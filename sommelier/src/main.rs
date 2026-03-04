@@ -1,3 +1,5 @@
+use clap::Parser;
+
 mod allocator;
 mod connection;
 mod handler;
@@ -17,48 +19,38 @@ mod protocols {
     ));
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Wayland display name to listen on.
+    #[arg(default_value = "wayland-proxy-0")]
+    display: String,
+
+    /// Use virtgpu channel for Wayland proxying (default).
+    #[arg(long, conflicts_with = "local_compositor")]
+    virtgpu_channel: bool,
+
+    /// Use local compositor socket path for Wayland proxying.
+    #[arg(long, conflicts_with = "virtgpu_channel")]
+    local_compositor: Option<String>,
+
+    /// Enable GPU acceleration.
+    #[arg(long)]
+    gpu_accel: bool,
+}
+
 #[tokio::main]
 async fn main() {
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::Builder::from_env(env).init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let mut display = "wayland-proxy-0".to_string();
-    let mut use_virtgpu = true;
-    let mut local_compositor = None;
-    let mut gpu_accel = false;
+    let args = Args::parse();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--virtgpu-channel" => {
-                use_virtgpu = true;
-                local_compositor = None;
-            }
-            "--local-compositor" => {
-                if i + 1 < args.len() {
-                    use_virtgpu = false;
-                    local_compositor = Some(args[i + 1].clone());
-                    i += 1;
-                } else {
-                    log::error!("--local-compositor requires a path argument");
-                    return;
-                }
-            }
-            "--gpu-accel" => {
-                gpu_accel = true;
-            }
-            arg => {
-                // If it's not a flag, assume it's the display name
-                if !arg.starts_with("--") {
-                    display = arg.to_string();
-                } else {
-                    log::error!("Unknown argument: {}", arg);
-                }
-            }
-        }
-        i += 1;
-    }
+    let display = args.display;
+    let local_compositor = args.local_compositor;
+    let gpu_accel = args.gpu_accel;
+    // Default to virtgpu unless local-compositor is specified.
+    let use_virtgpu = local_compositor.is_none();
 
     // Need XDG_RUNTIME_DIR
     let xdg_runtime = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR not set");

@@ -12,6 +12,7 @@ pub struct ShadowTable {
     host_to_guest: HashMap<u32, u32>,
     interfaces: HashMap<u32, String>,
     next_host_id: u32,
+    next_guest_server_id: u32,
 }
 
 impl ShadowTable {
@@ -23,6 +24,7 @@ impl ShadowTable {
             // Start at 2 to mimic standard Wayland client behavior.
             // ID 1 is reserved for wl_display.
             next_host_id: 2,
+            next_guest_server_id: 0xff000000,
         }
     }
 
@@ -32,7 +34,14 @@ impl ShadowTable {
         id
     }
 
+    pub fn allocate_guest_server_id(&mut self) -> u32 {
+        let id = self.next_guest_server_id;
+        self.next_guest_server_id += 1;
+        id
+    }
+
     pub fn map_id(&mut self, guest_id: u32, host_id: u32) {
+        log::debug!("ShadowTable: map_id guest {} -> host {}", guest_id, host_id);
         self.guest_to_host.insert(guest_id, host_id);
         self.host_to_guest.insert(host_id, guest_id);
     }
@@ -46,6 +55,7 @@ impl ShadowTable {
     }
 
     pub fn track_interface(&mut self, guest_id: u32, interface: String) {
+        log::debug!("ShadowTable: track_interface id {} -> {}", guest_id, interface);
         self.interfaces.insert(guest_id, interface);
     }
 
@@ -54,6 +64,7 @@ impl ShadowTable {
     }
 
     pub fn remove_id(&mut self, guest_id: u32) {
+        log::debug!("ShadowTable: remove_id guest {}", guest_id);
         if let Some(host_id) = self.guest_to_host.remove(&guest_id) {
             self.host_to_guest.remove(&host_id);
         }

@@ -25,6 +25,7 @@ pub const CROSS_DOMAIN_CMD_POLL: u8 = 3;
 pub const CROSS_DOMAIN_CMD_SEND: u8 = 4;
 pub const CROSS_DOMAIN_CMD_RECEIVE: u8 = 5;
 pub const CROSS_DOMAIN_CMD_READ: u8 = 6;
+pub const CROSS_DOMAIN_CMD_WRITE: u8 = 7;
 
 // Channel types
 pub const CROSS_DOMAIN_CHANNEL_TYPE_WAYLAND: u32 = 0x0001;
@@ -327,12 +328,74 @@ impl Drop for VirtGpuRing {
     }
 }
 
+pub struct VirtGpuSender {
+    file: File,
+}
+
+impl VirtGpuSender {
+    pub fn submit_cmd(
+        &self,
+        cmd_data: &[u8],
+        ring_idx: u32,
+        bo_handles: &[u32],
+        request_fence: bool,
+    ) -> Result<Option<OwnedFd>, nix::Error> {
+        let mut exec = DrmVirtgpuExecbuffer {
+            flags: 0,
+            size: cmd_data.len() as u32,
+            command: cmd_data.as_ptr() as u64,
+            bo_handles: bo_handles.as_ptr() as u64,
+            num_bo_handles: bo_handles.len() as u32,
+            fence_fd: -1,
+            ring_idx,
+            pad: 0,
+        };
+
+        if ring_idx != CROSS_DOMAIN_RING_NONE {
+            exec.flags |= VIRTGPU_EXECBUF_RING_IDX;
+        }
+
+        if request_fence {
+            exec.flags |= VIRTGPU_EXECBUF_FENCE_FD_OUT;
+        }
+
+        unsafe {
+            virtgpu_execbuffer(self.file.as_raw_fd(), &mut exec)?;
+        }
+
+        if request_fence && exec.fence_fd >= 0 {
+            Ok(Some(unsafe { OwnedFd::from_raw_fd(exec.fence_fd) }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn send_pipe_data(&self, pipe_id: u32, data: &[u8], hang_up: bool) -> Result<(), nix::Error> {
+        // warn!("Sender::send_pipe_data: pipe_id={} len={} hang_up={}", pipe_id, data.len(), hang_up);
+        let mut cmd = CrossDomainReadWrite::new_zeroed();
+        cmd.hdr.cmd = CROSS_DOMAIN_CMD_WRITE;
+        cmd.hdr.cmd_size = (std::mem::size_of::<CrossDomainReadWrite>() + data.len()) as u16;
+        cmd.identifier = pipe_id;
+        cmd.opaque_data_size = data.len() as u32;
+        cmd.hang_up = if hang_up { 1 } else { 0 };
+
+        let cmd_bytes = cmd.as_bytes();
+        let mut full_cmd = Vec::with_capacity(cmd_bytes.len() + data.len());
+        full_cmd.extend_from_slice(cmd_bytes);
+        full_cmd.extend_from_slice(data);
+
+        self.submit_cmd(&full_cmd, CROSS_DOMAIN_RING_NONE, &[], false)?;
+        Ok(())
+    }
+}
+
 pub struct VirtGpuChannel {
     file: AsyncFd<File>,
     pub query_ring: Option<VirtGpuRing>,
     pub channel_ring: Option<VirtGpuRing>,
     pipe_cache: HashMap<u64, u32>,
     id_to_fd: HashMap<u32, OwnedFd>,
+    pump_handles: HashMap<u32, tokio::task::AbortHandle>,
     read_pipe_id: u32,
 }
 
@@ -435,6 +498,7 @@ impl VirtGpuChannel {
                         channel_ring: None,
                         pipe_cache: HashMap::new(),
                         id_to_fd: HashMap::new(),
+                        pump_handles: HashMap::new(),
                         read_pipe_id: CROSS_DOMAIN_PIPE_READ_START,
                     });
                 }
@@ -545,27 +609,26 @@ impl VirtGpuChannel {
         let stat = fstat(fd_borrowed)?;
         if (stat.st_mode & SFlag::S_IFMT.bits()) == SFlag::S_IFIFO.bits() {
             if let Some(&id) = self.pipe_cache.get(&stat.st_ino) {
-                let flags_int = fcntl(fd_borrowed, FcntlArg::F_GETFL)?;
-                let flags = OFlag::from_bits_truncate(flags_int);
-                let type_ = if (flags & OFlag::O_ACCMODE).bits() == OFlag::O_WRONLY.bits() {
-                    CROSS_DOMAIN_ID_TYPE_WRITE_PIPE
-                } else {
-                    CROSS_DOMAIN_ID_TYPE_READ_PIPE
-                };
+                // Always use READ_PIPE for CMD_SEND, as rutabaga doesn't support WRITE_PIPE there.
+                let type_ = CROSS_DOMAIN_ID_TYPE_READ_PIPE;
                 return Ok((id, type_, 0, None));
             }
 
+            self.read_pipe_id = self.read_pipe_id.wrapping_add(1);
+            if self.read_pipe_id < CROSS_DOMAIN_PIPE_READ_START {
+                self.read_pipe_id = CROSS_DOMAIN_PIPE_READ_START;
+            }
             let id = self.read_pipe_id;
-            self.read_pipe_id += 1;
             self.pipe_cache.insert(stat.st_ino, id);
 
             let flags_int = fcntl(fd_borrowed, FcntlArg::F_GETFL)?;
-            let flags = OFlag::from_bits_truncate(flags_int);
-            let type_ = if (flags & OFlag::O_ACCMODE).bits() == OFlag::O_WRONLY.bits() {
-                CROSS_DOMAIN_ID_TYPE_WRITE_PIPE
-            } else {
-                CROSS_DOMAIN_ID_TYPE_READ_PIPE
-            };
+            let _flags = OFlag::from_bits_truncate(flags_int);
+            // In CROSS_DOMAIN_CMD_SEND (Guest -> Host), we always use READ_PIPE (3).
+            // Rutabaga interprets READ_PIPE as "Rutabaga reads from internal pipe", which means
+            // the Host Compositor writes to the other end. This matches the use case where
+            // Guest sends a Writable pipe for Paste (Host -> Guest data).
+            // Rutabaga does not support WRITE_PIPE in CMD_SEND.
+            let type_ = CROSS_DOMAIN_ID_TYPE_READ_PIPE;
 
             // We need to keep a reference to this pipe so it doesn't get closed if the user closes their end
             let dup_fd = dup(fd_borrowed)?;
@@ -921,7 +984,47 @@ impl VirtGpuChannel {
         Ok(())
     }
 
-    pub fn recv_wayland(&mut self) -> Result<(Vec<(Vec<u8>, Vec<OwnedFd>)>, OwnedFd), nix::Error> {
+    pub fn send_pipe_data(&mut self, pipe_id: u32, data: &[u8], hang_up: bool) -> Result<(), nix::Error> {
+        warn!("send_pipe_data: pipe_id={} len={} hang_up={}", pipe_id, data.len(), hang_up);
+        let mut cmd = CrossDomainReadWrite::new_zeroed();
+        cmd.hdr.cmd = CROSS_DOMAIN_CMD_WRITE;
+        cmd.hdr.cmd_size = (std::mem::size_of::<CrossDomainReadWrite>() + data.len()) as u16;
+        cmd.identifier = pipe_id;
+        cmd.opaque_data_size = data.len() as u32;
+        cmd.hang_up = if hang_up { 1 } else { 0 };
+
+        let cmd_bytes = cmd.as_bytes();
+        let mut full_cmd = Vec::with_capacity(cmd_bytes.len() + data.len());
+        full_cmd.extend_from_slice(cmd_bytes);
+        full_cmd.extend_from_slice(data);
+
+        self.submit_cmd(&full_cmd, CROSS_DOMAIN_RING_NONE, &[], false)?;
+
+        if hang_up {
+            if let Some(fd) = self.id_to_fd.remove(&pipe_id) {
+                if let Ok(stat) = fstat(&fd) {
+                    self.pipe_cache.remove(&stat.st_ino);
+                }
+            }
+            // If the pump called this (EOF), the handle is still in the map.
+            // If recv_wayland called this? recv_wayland doesn't call send_pipe_data.
+            // Only pump calls send_pipe_data.
+            self.pump_handles.remove(&pipe_id);
+        }
+
+        Ok(())
+    }
+
+    pub fn recv_wayland(
+        &mut self,
+    ) -> Result<
+        (
+            Vec<(Vec<u8>, Vec<OwnedFd>)>,
+            Vec<(u32, OwnedFd)>,
+            OwnedFd,
+        ),
+        nix::Error,
+    > {
         // Drain DRM events to clear readiness
         let mut event_buf = [0u8; 1024];
         loop {
@@ -938,150 +1041,160 @@ impl VirtGpuChannel {
         let slice = ring.as_slice_mut();
 
         let mut messages = Vec::new();
-        let mut offset = 0;
+        let mut new_pumps = Vec::new();
+
+        // Only process the command at offset 0, matching C++ implementation
+        let offset = 0;
 
         debug!("recv_wayland: slice len={}", slice.len());
 
-        while offset + std::mem::size_of::<CrossDomainHeader>() <= slice.len() {
+        if offset + std::mem::size_of::<CrossDomainHeader>() <= slice.len() {
             let hdr_bytes = &slice[offset..offset + std::mem::size_of::<CrossDomainHeader>()];
             let mut hdr = CrossDomainHeader::new_zeroed();
             hdr.as_bytes_mut().copy_from_slice(hdr_bytes);
 
-            if hdr.cmd == 0 {
-                // This is the normal end of the batch (zeros indicate no more commands).
+            if hdr.cmd != 0 {
+                let mut cmd_len = hdr.cmd_size as usize;
                 debug!(
-                    "recv_wayland: Reached end of command batch (cmd=0) at offset {}. Stop processing.",
-                    offset
+                    "recv_wayland: offset={} cmd={} size={} header_bytes=[{:02x}, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}, {:02x}]",
+                    offset, hdr.cmd, cmd_len,
+                    hdr_bytes[0], hdr_bytes[1], hdr_bytes[2], hdr_bytes[3],
+                    hdr_bytes[4], hdr_bytes[5], hdr_bytes[6], hdr_bytes[7]
                 );
-                break;
-            }
 
-            let mut cmd_len = hdr.cmd_size as usize;
-            debug!(
-                "recv_wayland: offset={} cmd={} size={}",
-                offset, hdr.cmd, cmd_len
-            );
-
-            if cmd_len < std::mem::size_of::<CrossDomainHeader>() {
+                // Robustness: For specific commands that carry variable data,
+                // we peek at the struct to determine the true size, in case the Host
+                // provided a `cmd_size` that only covers the header/struct but not the data.
                 if hdr.cmd == CROSS_DOMAIN_CMD_RECEIVE {
-                    // Workaround: Host sent 0 size for RECEIVE. Assume it has a body.
-                    // The body is at least sizeof(CrossDomainSendReceive) - sizeof(CrossDomainHeader) + opaque_data?
-                    // We can't know opaque_data size if cmd_size is 0!
-                    // But let's check if there is a valid struct there.
                     let struct_size = std::mem::size_of::<CrossDomainSendReceive>();
                     if offset + struct_size <= slice.len() {
                         let cmd_slice = &slice[offset..offset + struct_size];
                         let mut cmd_recv = CrossDomainSendReceive::new_zeroed();
                         cmd_recv.as_bytes_mut().copy_from_slice(cmd_slice);
 
-                        // Re-calculate length based on internal opaque_data_size
-                        cmd_len = struct_size + cmd_recv.opaque_data_size as usize;
-                        debug!("recv_wayland: workaround cmd_size=0, inferred len={} from opaque_data={}", cmd_len, cmd_recv.opaque_data_size);
-                    } else {
-                        error!("recv_wayland: invalid cmd_size 0 for RECEIVE and buffer too small");
-                        break;
+                        let calculated_len = struct_size + cmd_recv.opaque_data_size as usize;
+                        debug!("recv_wayland: RECEIVE struct_size={} opaque_data_size={} calculated_len={}", struct_size, cmd_recv.opaque_data_size, calculated_len);
+                        if calculated_len > cmd_len {
+                            debug!("recv_wayland: adjusting cmd_len for RECEIVE from {} to {} based on opaque_data_size", cmd_len, calculated_len);
+                            cmd_len = calculated_len;
+                        }
                     }
+                } else if hdr.cmd == CROSS_DOMAIN_CMD_READ {
+                    let struct_size = std::mem::size_of::<CrossDomainReadWrite>();
+                    if offset + struct_size <= slice.len() {
+                        let cmd_slice = &slice[offset..offset + struct_size];
+                        let mut cmd_read = CrossDomainReadWrite::new_zeroed();
+                        cmd_read.as_bytes_mut().copy_from_slice(cmd_slice);
+
+                        let calculated_len = struct_size + cmd_read.opaque_data_size as usize;
+                        debug!("recv_wayland: READ struct_size={} opaque_data_size={} calculated_len={}", struct_size, cmd_read.opaque_data_size, calculated_len);
+                        if calculated_len > cmd_len {
+                            debug!("recv_wayland: adjusting cmd_len for READ from {} to {} based on opaque_data_size", cmd_len, calculated_len);
+                            cmd_len = calculated_len;
+                        }
+                    }
+                }
+
+                if cmd_len < std::mem::size_of::<CrossDomainHeader>() {
+                    error!(
+                        "recv_wayland: invalid cmd_size {} (too small) at offset {}, cmd={}, breaking. Header bytes: {:?}",
+                        cmd_len, offset, hdr.cmd, hdr_bytes
+                    );
+                } else if offset + cmd_len > slice.len() {
+                    error!(
+                        "recv_wayland: cmd overflow at offset {} (len {} > slice {}), breaking",
+                        offset,
+                        offset + cmd_len,
+                        slice.len()
+                    );
                 } else {
-                    if hdr.cmd != 0 {
-                        error!(
-                            "recv_wayland: invalid cmd_size {} at offset {}, cmd={}, breaking. Header bytes: {:?}",
-                            cmd_len, offset, hdr.cmd, hdr_bytes
-                        );
-                    }
-                    break;
-                }
-            }
+                    let cmd_slice = &slice[offset..offset + cmd_len];
 
-            if offset + cmd_len > slice.len() {
-                error!(
-                    "recv_wayland: cmd overflow at offset {} (len {} > slice {}), breaking",
-                    offset,
-                    offset + cmd_len,
-                    slice.len()
-                );
-                break;
-            }
+                    if hdr.cmd == CROSS_DOMAIN_CMD_RECEIVE {
+                        let struct_size = std::mem::size_of::<CrossDomainSendReceive>();
+                        if cmd_slice.len() >= struct_size {
+                            let mut cmd_recv = CrossDomainSendReceive::new_zeroed();
+                            cmd_recv
+                                .as_bytes_mut()
+                                .copy_from_slice(&cmd_slice[..struct_size]);
 
-            let cmd_slice = &slice[offset..offset + cmd_len];
+                            let data_offset = struct_size;
+                            let data_len = cmd_recv.opaque_data_size as usize;
 
-            if hdr.cmd == CROSS_DOMAIN_CMD_RECEIVE {
-                let struct_size = std::mem::size_of::<CrossDomainSendReceive>();
-                if cmd_slice.len() >= struct_size {
-                    let mut cmd_recv = CrossDomainSendReceive::new_zeroed();
-                    cmd_recv
-                        .as_bytes_mut()
-                        .copy_from_slice(&cmd_slice[..struct_size]);
+                            if cmd_slice.len() >= data_offset + data_len {
+                                let data = cmd_slice[data_offset..data_offset + data_len].to_vec();
 
-                    let data_offset = struct_size;
-                    let data_len = cmd_recv.opaque_data_size as usize;
+                                let mut fds = Vec::new();
+                                for i in 0..cmd_recv.num_identifiers as usize {
+                                    if i >= CROSS_DOMAIN_MAX_IDENTIFIERS {
+                                        break;
+                                    }
+                                    let id = cmd_recv.identifiers[i];
+                                    let type_ = cmd_recv.identifier_types[i];
+                                    let size = cmd_recv.identifier_sizes[i] as u64;
 
-                    if cmd_slice.len() >= data_offset + data_len {
-                        let data = cmd_slice[data_offset..data_offset + data_len].to_vec();
+                                    if let Ok(fd) = if type_ == CROSS_DOMAIN_ID_TYPE_VIRTGPU_BLOB {
+                                        self.create_host_blob(id as u64, size)
+                                    } else if type_ == CROSS_DOMAIN_ID_TYPE_WRITE_PIPE
+                                        || type_ == CROSS_DOMAIN_ID_TYPE_READ_PIPE
+                                    {
+                                        let res = self.create_pipe_internal(id, type_);
+                                        if let Ok(_) = res {
+                                            // If we created a WRITE_PIPE, we kept the read end in id_to_fd.
+                                            // We need to pump it.
+                                            if type_ == CROSS_DOMAIN_ID_TYPE_WRITE_PIPE {
+                                                warn!("Creating WRITE_PIPE id={}", id);
+                                                if let Some(read_fd) = self.id_to_fd.get(&id) {
+                                                    if let Ok(dup_fd) = nix::unistd::dup(read_fd) {
+                                                        new_pumps.push((id, dup_fd));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        res
+                                    } else {
+                                        Err(Errno::EINVAL)
+                                    } {
+                                        fds.push(fd);
+                                    }
+                                }
 
-                        let mut fds = Vec::new();
-                        for i in 0..cmd_recv.num_identifiers as usize {
-                            if i >= CROSS_DOMAIN_MAX_IDENTIFIERS {
-                                break;
-                            }
-                            let id = cmd_recv.identifiers[i];
-                            let type_ = cmd_recv.identifier_types[i];
-                            let size = cmd_recv.identifier_sizes[i] as u64;
-
-                            if let Ok(fd) = if type_ == CROSS_DOMAIN_ID_TYPE_VIRTGPU_BLOB {
-                                self.create_host_blob(id as u64, size)
-                            } else if type_ == CROSS_DOMAIN_ID_TYPE_WRITE_PIPE
-                                || type_ == CROSS_DOMAIN_ID_TYPE_READ_PIPE
-                            {
-                                self.create_pipe_internal(id, type_)
-                            } else {
-                                Err(Errno::EINVAL)
-                            } {
-                                fds.push(fd);
+                                messages.push((data, fds));
                             }
                         }
+                    } else if hdr.cmd == CROSS_DOMAIN_CMD_READ {
+                        let struct_size = std::mem::size_of::<CrossDomainReadWrite>();
+                        if cmd_slice.len() >= struct_size {
+                            let mut cmd_read = CrossDomainReadWrite::new_zeroed();
+                            cmd_read
+                                .as_bytes_mut()
+                                .copy_from_slice(&cmd_slice[..struct_size]);
 
-                        messages.push((data, fds));
-                    }
-                }
-            } else if hdr.cmd == CROSS_DOMAIN_CMD_READ {
-                let struct_size = std::mem::size_of::<CrossDomainReadWrite>();
-                if cmd_slice.len() >= struct_size {
-                    let mut cmd_read = CrossDomainReadWrite::new_zeroed();
-                    cmd_read
-                        .as_bytes_mut()
-                        .copy_from_slice(&cmd_slice[..struct_size]);
+                            let data_offset = struct_size;
+                            let data_len = cmd_read.opaque_data_size as usize;
+                            if cmd_slice.len() >= data_offset + data_len {
+                                let data = &cmd_slice[data_offset..data_offset + data_len];
 
-                    let data_offset = struct_size;
-                    let data_len = cmd_read.opaque_data_size as usize;
-                    if cmd_slice.len() >= data_offset + data_len {
-                        let data = &cmd_slice[data_offset..data_offset + data_len];
+                                if let Some(fd_owned) = self.id_to_fd.get(&cmd_read.identifier) {
+                                    let _ = write(fd_owned, data);
+                                }
 
-                        if let Some(fd_owned) = self.id_to_fd.get(&cmd_read.identifier) {
-                            let _ = write(fd_owned, data);
+                                if cmd_read.hang_up != 0 {
+                                    self.id_to_fd.remove(&cmd_read.identifier);
+                                    if let Some(handle) = self.pump_handles.remove(&cmd_read.identifier) {
+                                        handle.abort();
+                                    }
+                                }
+                            }
                         }
                     }
+
+                    // Zero out the processed command
+                    slice[offset..offset + cmd_len].fill(0);
                 }
-            }
-
-            // 1. Calculate the aligned size to advance
-            // (Ensure cmd_len includes the workaround size if it was 0)
-            let aligned_size = (cmd_len + 3) & !3;
-
-            // 2. CRITICAL: Zero out the memory we just read.
-            // Using .fill(0) is safer than just setting slice[offset]=0 because
-            // it clears the 'cmd_len' and payload too, preventing garbage logs.
-            if offset + cmd_len <= slice.len() {
-                slice[offset..offset + cmd_len].fill(0);
             } else {
-                // Fallback if size calc was weird, at least kill the cmd byte
-                if offset < slice.len() {
-                    error!("Failed to clear command buffer");
-                    slice[offset] = 0;
-                }
+                 debug!("recv_wayland: cmd at offset 0 is 0, nothing to process");
             }
-
-            // 3. Advance the offset
-            offset += aligned_size;
         }
 
         // Restore the ring
@@ -1105,7 +1218,7 @@ impl VirtGpuChannel {
         )?;
         let fence = fence.ok_or(Errno::EIO)?;
 
-        Ok((messages, fence))
+        Ok((messages, new_pumps, fence))
     }
 }
 
@@ -1160,7 +1273,7 @@ pub fn spawn_virtgpu_actor(
                              };
 
                              match res {
-                                 Ok((messages, new_fence)) => {
+                                 Ok((messages, new_pumps, new_fence)) => {
                                      match AsyncFd::new(new_fence) {
                                          Ok(f) => current_fence = f,
                                          Err(e) => {
@@ -1172,6 +1285,116 @@ pub fn spawn_virtgpu_actor(
                                      for (data, owned_fds) in messages {
                                          if event_tx.send((data, owned_fds)).await.is_err() {
                                              break;
+                                         }
+                                     }
+
+                                     // Spawn pump tasks for new write pipes
+                                     for (pipe_id, read_fd_raw) in new_pumps {
+                                         warn!("Pump {}: starting", pipe_id);
+                                         let chan_clone = channel.clone();
+
+                                         // Clone file for concurrent sending without lock
+                                         let file_clone = {
+                                             let c = channel.lock().unwrap();
+                                             c.file.get_ref().try_clone().expect("Failed to clone virtgpu file")
+                                         };
+                                         let sender = VirtGpuSender { file: file_clone };
+
+                                         let handle = tokio::spawn(async move {
+                                             // read_fd_raw is actually OwnedFd based on the error message?
+                                             // Or did I misread the error? "expected `i32`, found `OwnedFd`"
+                                             // This usually means the function expected i32, but got OwnedFd.
+                                             // `OwnedFd::from_raw_fd` expects `RawFd` (i32).
+                                             // So `read_fd_raw` MUST be `OwnedFd`.
+                                             let read_fd = read_fd_raw; 
+
+                                             // Set O_NONBLOCK
+                                             let flags = match fcntl(&read_fd, FcntlArg::F_GETFL) {
+                                                 Ok(f) => f,
+                                                 Err(e) => {
+                                                     error!("Pump {}: failed to get flags: {}", pipe_id, e);
+                                                     return;
+                                                 }
+                                             };
+                                             
+                                             let mut flags = OFlag::from_bits_truncate(flags);
+                                             flags.insert(OFlag::O_NONBLOCK);
+                                             
+                                             if let Err(e) = fcntl(&read_fd, FcntlArg::F_SETFL(flags)) {
+                                                 error!("Pump {}: failed to set O_NONBLOCK: {}", pipe_id, e);
+                                                 return;
+                                             }
+
+                                             let async_fd = match AsyncFd::new(read_fd) {
+                                                 Ok(f) => f,
+                                                 Err(e) => {
+                                                     error!("Pump {}: failed to create AsyncFd: {}", pipe_id, e);
+                                                     return;
+                                                 }
+                                             };
+                                             
+                                             let mut buf = [0u8; 16384];
+                                             let mut draining = false;
+
+                                             loop {
+                                                 let mut guard = match async_fd.readable().await {
+                                                     Ok(g) => g,
+                                                     Err(e) => {
+                                                         error!("Pump {}: readable error: {}", pipe_id, e);
+                                                         warn!("Pump {}: read error: {}", pipe_id, e);
+                                                         break;
+                                                     }
+                                                 };
+
+                                                 loop {
+                                                     match guard.try_io(|inner| {
+                                                         nix::unistd::read(inner, &mut buf)
+                                                             .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
+                                                     }) {
+                                                         Ok(Ok(0)) => {
+                                                             debug!("Pump {}: EOF", pipe_id);
+                                                             warn!("Pump {}: EOF", pipe_id);
+                                                             if !draining {
+                                                                 if let Ok(mut c) = chan_clone.lock() {
+                                                                     let _ = c.send_pipe_data(pipe_id, &[], true);
+                                                                 }
+                                                             }
+                                                             return;
+                                                         }
+                                                         Ok(Ok(n)) => {
+                                                             warn!("Pump {}: read {} bytes", pipe_id, n);
+                                                             if !draining {
+                                                                 // Use sender for lock-free sending
+                                                                 let res = sender.send_pipe_data(pipe_id, &buf[..n], false);
+                                                                 if let Err(e) = res {
+                                                                     error!("Pump {}: error sending data: {}. Switching to drain mode.", pipe_id, e);
+                                                                     warn!("Pump {}: error sending data: {}. Switching to drain mode.", pipe_id, e);
+                                                                     draining = true;
+                                                                 } else {
+                                                                     warn!("Pump {}: sent {} bytes successfully", pipe_id, n);
+                                                                 }
+                                                             }
+                                                         }
+                                                         Ok(Err(e)) => {
+                                                             error!("Pump {}: read error: {}", pipe_id, e);
+                                                             warn!("Pump {}: read error: {}", pipe_id, e);
+                                                             if !draining {
+                                                                 if let Ok(mut c) = chan_clone.lock() {
+                                                                     let _ = c.send_pipe_data(pipe_id, &[], true);
+                                                                 }
+                                                             }
+                                                             return;
+                                                         }
+                                                         Err(_would_block) => {
+                                                             break;
+                                                         }
+                                                     }
+                                                 }
+                                             }
+                                         });
+
+                                         if let Ok(mut c) = channel.lock() {
+                                             c.pump_handles.insert(pipe_id, handle.abort_handle());
                                          }
                                      }
                                  }

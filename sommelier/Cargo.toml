@@ -12,8 +12,7 @@ drm = "0.11"
 zerocopy = { version = "0.7", features = ["derive"] }
 log = "0.4.29"
 env_logger = "0.11.9"
-# wayland-client = "0.31"
-# wayland-protocols = { version = "0.31", features = ["client"] }
+clap = { version = "4.5", features = ["derive"] }
 
 [build-dependencies]
 wayland_codegen = { path = "../wayland_codegen" }
@@ -21,7 +20,3 @@ wayland_codegen = { path = "../wayland_codegen" }
 [[bin]]
 name = "sommelier"
 path = "src/main.rs"
-
-# [[bin]]
-# name = "dmabuf-tester"
-# path = "src/dmabuf-test.rs"

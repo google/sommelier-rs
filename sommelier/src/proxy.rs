@@ -22,6 +22,7 @@ struct SommelierHandler {
     callback: crate::handler::callback::CallbackHandler,
     shm: crate::handler::shm::ShmHandler,
     linux_dmabuf: crate::handler::linux_dmabuf::LinuxDmabufHandler,
+    data_device: crate::handler::data_device::DataDeviceHandler,
 }
 
 impl SommelierHandler {
@@ -33,6 +34,7 @@ impl SommelierHandler {
             callback: crate::handler::callback::CallbackHandler,
             shm: crate::handler::shm::ShmHandler,
             linux_dmabuf: crate::handler::linux_dmabuf::LinuxDmabufHandler,
+            data_device: crate::handler::data_device::DataDeviceHandler::new(),
         }
     }
 }
@@ -206,27 +208,8 @@ impl Client {
             };
 
             match result {
-                Ok(Some((mut data, fds))) => {
+                Ok(Some((data, fds))) => {
                     log::debug!("  -> translated ({} bytes, {} fds)", data.len(), fds.len());
-
-                    // Patch ID in the forwarded message
-                    if let Some(gid) = guest_id {
-                        let target_id = match direction {
-                            Direction::ClientToHost => self.ctx.shadow_table.get_host_id(gid),
-                            Direction::HostToClient => Some(gid),
-                        };
-
-                        if let Some(tid) = target_id {
-                            if data.len() >= 4 {
-                                data[0..4].copy_from_slice(&tid.to_ne_bytes());
-                            }
-                        } else {
-                            // If we can't map the ID, it might be a new object or error.
-                            // For ClientToHost, it's usually sender which should be mapped.
-                            // We log a warning but send anyway (might fail on host).
-                            log::warn!("Could not map sender ID {} to host ID", gid);
-                        }
-                    }
 
                     out_buffer.extend_from_slice(&data);
                     out_fds.extend(fds);
@@ -265,17 +248,22 @@ impl Client {
             if other_conn.send(&out_buffer, &out_fds).await.is_err() {
                 success = false;
             }
-            // Close sent FDs to prevent leak in proxy
-            for fd in out_fds {
-                let _ = nix::unistd::close(fd);
-            }
         }
 
-        // Close consumed FDs from source
-        for fd in conn.read_fds.drain(..fd_offset) {
+        // Collect all FDs to close (both sent and consumed) into a set to avoid double-closing
+        // FDs that are in both lists (e.g. forwarded FDs). Double-closing is dangerous as it
+        // creates a race where a newly allocated FD (e.g. from dup in another thread) could be
+        // closed accidentally.
+        let mut fds_to_close: std::collections::HashSet<RawFd> = std::collections::HashSet::new();
+        fds_to_close.extend(out_fds.iter());
+        fds_to_close.extend(conn.read_fds.iter().take(fd_offset));
+
+        for fd in fds_to_close {
             let _ = nix::unistd::close(fd);
         }
-        // Remove consumed data
+
+        // Remove consumed data and FDs
+        conn.read_fds.drain(..fd_offset);
         conn.read_buf.drain(..offset);
 
         success
@@ -294,7 +282,11 @@ protocols::wayland::impl_sommelier_delegates!(SommelierHandler, {
     wl_region: compositor,
     wl_shm: shm,
     wl_shm_pool: shm,
-    wl_buffer: shm
+    wl_buffer: shm,
+    wl_data_device_manager: data_device,
+    wl_data_device: data_device,
+    wl_data_source: data_device,
+    wl_data_offer: data_device
 });
 impl protocols::wayland::ProtocolHandler for SommelierHandler {}
 
