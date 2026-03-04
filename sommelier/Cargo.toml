@@ -1,24 +1,42 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 [package]
 name = "sommelier"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nix = { version = "0.31.1", features = ["socket", "poll", "uio", "fs", "ioctl", "mman"] }
-tokio = { version = "1.49.0", features = ["full"] }
+nix = { version = "0.31", features = [
+    "socket",
+    "poll",
+    "uio",
+    "fs",
+    "ioctl",
+    "mman",
+] }
+tokio = { version = "1.49", features = ["full"] }
 libc = "0.2"
-gbm = "0.16"
-drm = "0.11"
+gbm = { version = "0.16", default-features = false, features = ["drm-support"] }
+drm = "0.14"
 zerocopy = { version = "0.7", features = ["derive"] }
-log = "0.4.29"
-env_logger = "0.11.9"
+log = "0.4"
+env_logger = "0.11"
 clap = { version = "4.5", features = ["derive"] }
 
 [build-dependencies]
 wayland_codegen = { path = "../wayland_codegen" }
-
-[features]
-virtio-wayland = []
 
 
 [[bin]]

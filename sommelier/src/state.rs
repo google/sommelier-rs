@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{OwnedFd, RawFd};
 use std::sync::{Arc, RwLock};
@@ -40,7 +56,11 @@ impl ShadowTable {
     }
 
     pub fn map_id(&mut self, guest_id: u32, host_id: u32) {
-        self.guest_to_host.insert(guest_id, host_id);
+        if let Some(old_host_id) = self.guest_to_host.insert(guest_id, host_id) {
+            if old_host_id != host_id {
+                self.host_to_guest.remove(&old_host_id);
+            }
+        }
         self.host_to_guest.insert(host_id, guest_id);
     }
 

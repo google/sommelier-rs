@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 use crate::connection::WaylandConnection;
 use crate::protocols;
 use crate::state::Context;
@@ -361,13 +377,21 @@ pub async fn run(
     virtio_wayland: Option<String>,
 ) {
     if let Some(path) = &virtio_wayland {
-        if let Err(e) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        if let Err(e) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+        {
             log::error!("Failed to open virtio-wayland device {}: {}", path, e);
             std::process::exit(1);
         }
     } else if let Some(path) = &local_compositor {
         if let Err(e) = std::os::unix::net::UnixStream::connect(path) {
-            log::error!("Failed to connect to local compositor socket {}: {}", path, e);
+            log::error!(
+                "Failed to connect to local compositor socket {}: {}",
+                path,
+                e
+            );
             std::process::exit(1);
         }
     }

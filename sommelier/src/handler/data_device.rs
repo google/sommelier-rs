@@ -1,6 +1,18 @@
-// Copyright 2026 The ChromiumOS Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 use crate::protocols::wayland::wl_data_device;
 use crate::protocols::wayland::wl_data_device_manager;
@@ -14,29 +26,18 @@ use std::os::unix::io::IntoRawFd;
 pub struct DataDeviceHandler;
 
 impl wl_data_device_manager::WlDataDeviceManagerHandler for DataDeviceHandler {
-    fn on_create_data_source(&mut self, ctx: &mut Context, id: u32) -> Action {
+    fn on_create_data_source(&mut self, _ctx: &mut Context, id: u32) -> Action {
         debug!("Tracking data source id={}", id);
-        // Track the data source
-        ctx.shadow_table.map_id(id, id);
-        ctx.shadow_table
-            .track_interface(id, "wl_data_source".to_string());
         Action::Forward
     }
 
-    fn on_get_data_device(&mut self, ctx: &mut Context, id: u32, _seat: u32) -> Action {
-        // Track the data device
-        ctx.shadow_table
-            .track_interface(id, "wl_data_device".to_string());
+    fn on_get_data_device(&mut self, _ctx: &mut Context, _id: u32, _seat: u32) -> Action {
         Action::Forward
     }
 }
 
 impl wl_data_device::WlDataDeviceHandler for DataDeviceHandler {
-    fn on_data_offer(&mut self, ctx: &mut Context, id: u32) -> Action {
-        // Track the data offer
-        ctx.shadow_table.map_id(id, id);
-        ctx.shadow_table
-            .track_interface(id, "wl_data_offer".to_string());
+    fn on_data_offer(&mut self, _ctx: &mut Context, _id: u32) -> Action {
         Action::Forward
     }
 }

@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 use clap::Parser;
 
 mod allocator;
@@ -28,12 +44,12 @@ mod protocols {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Connect to a local compositor at PATH
+    /// Connect to a local compositor at PATH, used for debug only
     #[arg(long)]
     local_compositor: Option<String>,
 
-    /// Enable GPU acceleration
-    #[arg(long)]
+    /// Enable GPU acceleration (virtio-gpu). Currently broken in this branch!
+    #[arg(long, hide = true, default_value_t = false)]
     gpu_accel: bool,
 
     /// Disable XDG Decoration support
@@ -42,7 +58,7 @@ struct Args {
 
     /// Use virtio-wayland channel at PATH (defaults to /dev/wl0 if --local-compositor is not specified)
     #[arg(long)]
-    virtio_wayland: Option<String>,
+    virtio_wl: Option<String>,
 
     /// The display name (e.g. wayland-proxy-0)
     #[arg(default_value = "wayland-proxy-0")]
@@ -59,14 +75,14 @@ async fn main() {
     let local_compositor = args.local_compositor;
     let gpu_accel = args.gpu_accel;
     let disable_xdg_decoration = args.no_xdg_decoration;
-    let mut virtio_wayland = args.virtio_wayland;
+    let mut virtio_wl = args.virtio_wl;
 
-    if local_compositor.is_none() && virtio_wayland.is_none() {
-        virtio_wayland = Some("/dev/wl0".to_string());
+    if local_compositor.is_none() && virtio_wl.is_none() {
+        virtio_wl = Some("/dev/wl0".to_string());
     }
 
-    if virtio_wayland.is_some() && gpu_accel {
-        log::error!("--virtio-wayland and --gpu-accel cannot be used together");
+    if virtio_wl.is_some() && gpu_accel {
+        log::error!("--virtio-wl and --gpu-accel cannot be used together");
         return;
     }
 
@@ -82,7 +98,7 @@ async fn main() {
         local_compositor,
         gpu_accel,
         disable_xdg_decoration,
-        virtio_wayland,
+        virtio_wl,
     )
     .await;
 }
