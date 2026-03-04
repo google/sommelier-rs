@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 use crate::protocols;
 use crate::state::{BufferState, Context, PoolInner, PoolState};
 use crate::wire::{Action, MessageBuilder};
@@ -209,7 +225,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             let mut full_msg = Vec::new();
             full_msg.extend_from_slice(&host_wl_shm_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 0_u32; // wl_shm.create_pool = 0
+            let word2: u32 = len << 16; // wl_shm.create_pool = 0
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
@@ -240,7 +256,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             let mut full_msg = Vec::new();
             full_msg.extend_from_slice(&host_pool_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 0_u32; // wl_shm_pool.create_buffer = 0
+            let word2: u32 = len << 16; // wl_shm_pool.create_buffer = 0
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
@@ -340,7 +356,7 @@ impl protocols::wayland::wl_buffer::WlBufferHandler for ShmHandler {
             full_msg.extend_from_slice(&host_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
             // REQ_DESTROY is 0 for wl_buffer
-            let word2 = (len << 16) | 0_u32;
+            let word2: u32 = len << 16;
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 

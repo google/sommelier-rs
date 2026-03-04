@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 use gbm::{BufferObjectFlags, Format};
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -54,9 +70,14 @@ impl Allocator {
             val => {
                 // If the value is large, it might be a FourCC code already (e.g. from dmabuf).
                 // However, small values are likely Wayland SHM formats we don't support yet.
-                // We'll try to transmute if it looks like a FourCC (usually ASCII chars).
+                // We'll try to convert if it looks like a FourCC (usually ASCII chars).
                 if val > 0xff {
-                    unsafe { std::mem::transmute(val) }
+                    Format::try_from(val).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!("Invalid DRM FourCC format: {}", val),
+                        )
+                    })?
                 } else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,

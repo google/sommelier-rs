@@ -1,53 +1,70 @@
 # Sommelier-rs: Virtio-GPU Cross-Domain Wayland Proxy
 
-This project is a Rust rewrite of the Sommelier Wayland proxy. Its goal is to allow unmodified GUI applications running inside a Guest Virtual Machine (VM) to render windows seamlessly onto the Host machine's desktop, complete with native window management, clipboard sharing, and hardware-accelerated buffer transport.
+This project is a rust rewrite of the [Sommelier](https://chromium.googlesource.com/chromiumos/platform2/+/main/vm_tools/sommelier/) Wayland proxy. Its goal is to allow unmodified GUI applications running inside a virtual machine to display windows seamlessly onto the Host machine's desktop, complete with native window management and clipboard sharing. Supporting X is an explicit no-goal for this project.
+
+This project is designed to be used as a companion to [crosvm](https://github.com/google/crosvm). It should also work with other virtual machine monitors (VMMs) that support virtio-gpu cross domain.
 
 ## Quick Start
 
+**To run it on ChromeOS, use `virtwl` branch. Main branch will not work on ChromeOS.**
+
 ### Prerequisites
 
-- Rust toolchain (cargo, rustc)
+- Rust toolchain
 - A Wayland compositor running on the host
-- Linux dependencies for Wayland/GBM/DRM development
+- A VMM with virtio-gpu cross domain support enabled
+- Linux pacakge dependencies installed in guest
 
-### Build and Run
+### Build and Run (on a Debian-compatible distro)
 
-1. Navigate to the project root:
+1. Install dependencies
+
    ```bash
-   # cd sommelier-rs-stagging
+   sudo apt-get install build-essential pkg-config libgbm-dev libdrm-dev
    ```
 
-2. Build the workspace:
+2. Navigate to the project root:
+
    ```bash
-   cargo build
+   cd sommelier-rs
    ```
 
-3. Run the proxy:
+3. Build the workspace:
+
    ```bash
-   cargo run --bin sommelier
+   cargo build --release
    ```
 
-*(Note: Depending on your environment, you may need to configure specific environment variables such as `WAYLAND_DISPLAY` or setup virtio-gpu paths).*
+4. Run the proxy:
 
-## Architecture
+   ```bash
+   target/release/sommelier wayland-0
+   ```
 
-This proxy acts as a complex "Man-in-the-Middle" between the Guest applications and the Host Compositor (e.g., Weston, Mutter, KWin). It handles the complexities of bridging the VM boundary, including:
+*(Note: Depending on your environment, you may need to stop existing wayland compositors before running the proxy as `wayland-0`. Alternatively you can specify `WAYLAND_DISPLAY=wayland-proxy-0` for the application you wish to run through the proxy).*
 
-*   **Modes of Operation:** The proxy supports a **Placeholder Proxy (Local Mode)** for rapid development and debugging where no VM boundary is crossed (proxying clients to a host compositor on the same OS). It also supports a **Cross-Domain Proxy (VM Mode)**, the primary operational mode, where it utilizes `virtio-gpu` to tunnel commands and memory across a true VM boundary. *(Note: If you are using this over a `virtio-wayland` virtual device, e.g., when running in a guest on ChromeOS, please refer to the `virtwl` branch).*
-*   **State Management (Shadow Table):** Multiplexing multiple Wayland clients over a single host connection by mapping client-allocated object IDs to host-allocated IDs.
-*   **"Split-Brain" Memory Bridging:** Bridging the file descriptor gap between Guest and Host. The proxy handles `wl_shm` by directly allocating cross-domain hardware buffers (dma-bufs) via `virtio-gpu`. These dma-bufs are passed to the host compositor as standard `wl_shm` pools (since they are mappable FDs). When the guest commits a frame, the proxy performs a CPU copy from the guest's POSIX SHM into the mapped dma-buf, handling stride and alignment differences automatically. The host compositor receives standard `wl_shm` calls for guest `wl_shm` surfaces.
-*   **Protocol Codegen:** Utilizing code generation from Wayland XML definitions to automatically handle the vast majority of Wayland protocol dispatch and ID mapping, reducing boilerplate and errors.
+## Design
+
+This proxy acts as a state-tracking proxy between the Guest applications and the Host Compositor (e.g., Weston, Mutter, KWin). It handles the bridging over VM boundary together with the VMM. It runs in the guest, serving as the guest's wayland compositor facing guest wayland clients.
+
+- **Modes of Operation:** The proxy supports a **Placeholder Proxy (Local Mode)** for debugging and testing where no VM boundary is crossed (proxying clients to a host compositor on the same OS). It also supports a **Cross-Domain Proxy (VM Mode)**, the primary operational mode, where it utilizes virtio-gpu cross domain to tunnel commands and memory across VM boundary.
+- **State Management (Shadow Table):** Managing Wayland protocol state and mapping wayland object IDs, as it is required for the proxy to understand and track wayland protocol state to function. The proxy uses a one-to-one mapping between host connections and client connections to prevent a faulty client from triggering the host compositor tearing down connections for other clients.
+- **Protocol Codegen:** Utilizing code generation from Wayland XML definitions to automatically handle the vast majority of Wayland protocol dispatch and ID mapping, reducing boilerplate and errors.
 
 ## Project Structure
 
-*   `sommelier/`: The main proxy executable and core logic.
-    *   `src/`: Source code for the proxy, including connections, state management, and protocol handlers.
-*   `wayland_codegen/`: A build-time crate that generates Rust code from Wayland XML protocol definitions.
-*   `protocols/`: XML files defining the Wayland core protocol and extensions used by the project.
-*   `docs/`: Architecture documentation.
+- `sommelier/`: The main proxy executable and core logic.
+  - `src/handler`: Non-default set of wayland protocol handler implementations, used when codegen is insufficient.
+- `wayland_codegen/`: A build-time crate that generates Rust code from Wayland XML protocol definitions. This is not an equivalent to `wayland-scanner`.
+- `third_party/protocols/`: XML files defining the Wayland core protocol and extensions used by the project.
+- `docs/`: Documentations.
 
 ## Further Reading
 
-For a detailed dive into the architecture and the challenges this project solves, see `docs/architectures.md`.
+For a detailed dive into the architecture, see `docs/ARCHITECTURE.md`.
 
+## Other Notes
 
+This is not an officially supported Google product. This project is not
+eligible for the [Google Open Source Software Vulnerability Rewards
+Program](https://bughunters.google.com/open-source-security).

@@ -1,3 +1,19 @@
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 use clap::Parser;
 
 mod allocator;
@@ -30,12 +46,12 @@ struct Args {
     #[arg(long, conflicts_with = "local_compositor")]
     virtgpu_channel: bool,
 
-    /// Use local compositor socket path for Wayland proxying.
+    /// Use local compositor socket path for Wayland proxying, for debug use only.
     #[arg(long, conflicts_with = "virtgpu_channel")]
     local_compositor: Option<String>,
 
-    /// Enable GPU acceleration.
-    #[arg(long)]
+    /// Experimental: Enable GPU acceleration. Not functional
+    #[arg(long, hide = true, default_value_t = false)]
     gpu_accel: bool,
 }
 

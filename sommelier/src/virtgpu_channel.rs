@@ -1,6 +1,18 @@
-// Copyright 2021 The ChromiumOS Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
 
 use log::{debug, error, info, warn};
 use nix::errno::Errno;
@@ -140,6 +152,7 @@ pub const VIRTGPU_BLOB_MEM_HOST3D: u32 = 0x0002;
 
 pub const VIRTGPU_BLOB_FLAG_USE_MAPPABLE: u32 = 0x0001;
 pub const VIRTGPU_BLOB_FLAG_USE_SHAREABLE: u32 = 0x0002;
+#[allow(unused)]
 pub const VIRTGPU_BLOB_FLAG_USE_CROSS_DEVICE: u32 = 0x0003;
 
 pub const VIRTGPU_CONTEXT_PARAM_CAPSET_ID: u64 = 0x0001;
@@ -370,7 +383,12 @@ impl VirtGpuSender {
         }
     }
 
-    pub fn send_pipe_data(&self, pipe_id: u32, data: &[u8], hang_up: bool) -> Result<(), nix::Error> {
+    pub fn send_pipe_data(
+        &self,
+        pipe_id: u32,
+        data: &[u8],
+        hang_up: bool,
+    ) -> Result<(), nix::Error> {
         // warn!("Sender::send_pipe_data: pipe_id={} len={} hang_up={}", pipe_id, data.len(), hang_up);
         let mut cmd = CrossDomainReadWrite::new_zeroed();
         cmd.hdr.cmd = CROSS_DOMAIN_CMD_WRITE;
@@ -984,8 +1002,18 @@ impl VirtGpuChannel {
         Ok(())
     }
 
-    pub fn send_pipe_data(&mut self, pipe_id: u32, data: &[u8], hang_up: bool) -> Result<(), nix::Error> {
-        warn!("send_pipe_data: pipe_id={} len={} hang_up={}", pipe_id, data.len(), hang_up);
+    pub fn send_pipe_data(
+        &mut self,
+        pipe_id: u32,
+        data: &[u8],
+        hang_up: bool,
+    ) -> Result<(), nix::Error> {
+        warn!(
+            "send_pipe_data: pipe_id={} len={} hang_up={}",
+            pipe_id,
+            data.len(),
+            hang_up
+        );
         let mut cmd = CrossDomainReadWrite::new_zeroed();
         cmd.hdr.cmd = CROSS_DOMAIN_CMD_WRITE;
         cmd.hdr.cmd_size = (std::mem::size_of::<CrossDomainReadWrite>() + data.len()) as u16;
@@ -1017,14 +1045,7 @@ impl VirtGpuChannel {
 
     pub fn recv_wayland(
         &mut self,
-    ) -> Result<
-        (
-            Vec<(Vec<u8>, Vec<OwnedFd>)>,
-            Vec<(u32, OwnedFd)>,
-            OwnedFd,
-        ),
-        nix::Error,
-    > {
+    ) -> Result<(Vec<(Vec<u8>, Vec<OwnedFd>)>, Vec<(u32, OwnedFd)>, OwnedFd), nix::Error> {
         // Drain DRM events to clear readiness
         let mut event_buf = [0u8; 1024];
         loop {
@@ -1181,7 +1202,9 @@ impl VirtGpuChannel {
 
                                 if cmd_read.hang_up != 0 {
                                     self.id_to_fd.remove(&cmd_read.identifier);
-                                    if let Some(handle) = self.pump_handles.remove(&cmd_read.identifier) {
+                                    if let Some(handle) =
+                                        self.pump_handles.remove(&cmd_read.identifier)
+                                    {
                                         handle.abort();
                                     }
                                 }
@@ -1193,7 +1216,7 @@ impl VirtGpuChannel {
                     slice[offset..offset + cmd_len].fill(0);
                 }
             } else {
-                 debug!("recv_wayland: cmd at offset 0 is 0, nothing to process");
+                debug!("recv_wayland: cmd at offset 0 is 0, nothing to process");
             }
         }
 
@@ -1306,7 +1329,7 @@ pub fn spawn_virtgpu_actor(
                                              // This usually means the function expected i32, but got OwnedFd.
                                              // `OwnedFd::from_raw_fd` expects `RawFd` (i32).
                                              // So `read_fd_raw` MUST be `OwnedFd`.
-                                             let read_fd = read_fd_raw; 
+                                             let read_fd = read_fd_raw;
 
                                              // Set O_NONBLOCK
                                              let flags = match fcntl(&read_fd, FcntlArg::F_GETFL) {
@@ -1316,10 +1339,10 @@ pub fn spawn_virtgpu_actor(
                                                      return;
                                                  }
                                              };
-                                             
+
                                              let mut flags = OFlag::from_bits_truncate(flags);
                                              flags.insert(OFlag::O_NONBLOCK);
-                                             
+
                                              if let Err(e) = fcntl(&read_fd, FcntlArg::F_SETFL(flags)) {
                                                  error!("Pump {}: failed to set O_NONBLOCK: {}", pipe_id, e);
                                                  return;
@@ -1332,7 +1355,7 @@ pub fn spawn_virtgpu_actor(
                                                      return;
                                                  }
                                              };
-                                             
+
                                              let mut buf = [0u8; 16384];
                                              let mut draining = false;
 
