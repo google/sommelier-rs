@@ -90,7 +90,12 @@ impl<'a> WireMessage<'a> {
             return Err(ProtocolError::InvalidString);
         }
 
-        let s = String::from_utf8_lossy(&bytes[..len.saturating_sub(1)]).to_string();
+        // To match C behavior, we truncate at the first null terminator if there are interior nulls
+        let null_pos = bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(len.saturating_sub(1));
+        let s = String::from_utf8_lossy(&bytes[..null_pos]).into_owned();
 
         self.offset += padded_len;
         Ok(s)
@@ -156,9 +161,8 @@ impl MessageBuilder {
         // padding
         let padded_len = (len + 3) & !3;
         let padding = padded_len - len;
-        for _ in 0..padding {
-            self.payload.push(0);
-        }
+        self.payload
+            .resize(self.payload.len() + padding as usize, 0);
     }
 
     pub fn write_array(&mut self, val: &[u8]) {
@@ -169,9 +173,8 @@ impl MessageBuilder {
 
         let padded_len = (len + 3) & !3;
         let padding = padded_len - len;
-        for _ in 0..padding {
-            self.payload.push(0);
-        }
+        self.payload
+            .resize(self.payload.len() + padding as usize, 0);
     }
 
     pub fn write_fd(&mut self, fd: RawFd) {

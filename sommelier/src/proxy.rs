@@ -1,13 +1,15 @@
 use crate::connection::WaylandConnection;
 use crate::protocols;
 use crate::state::Context;
-use crate::virtgpu_channel::VirtGpuChannel;
+use crate::virtwl_channel::VirtWaylandChannel;
 use crate::wire::{ProtocolError, WireMessage};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::{IntoRawFd, RawFd};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
+
+type DispatchResult = Result<Option<(Vec<u8>, Vec<RawFd>)>, ProtocolError>;
 
 #[derive(Debug, Clone, Copy)]
 enum Direction {
@@ -22,6 +24,7 @@ struct SommelierHandler {
     callback: crate::handler::callback::CallbackHandler,
     shm: crate::handler::shm::ShmHandler,
     linux_dmabuf: crate::handler::linux_dmabuf::LinuxDmabufHandler,
+    data_device: crate::handler::data_device::DataDeviceHandler,
 }
 
 impl SommelierHandler {
@@ -33,6 +36,7 @@ impl SommelierHandler {
             callback: crate::handler::callback::CallbackHandler,
             shm: crate::handler::shm::ShmHandler,
             linux_dmabuf: crate::handler::linux_dmabuf::LinuxDmabufHandler,
+            data_device: crate::handler::data_device::DataDeviceHandler,
         }
     }
 }
@@ -45,11 +49,16 @@ struct Client {
 }
 
 impl Client {
-    fn new(client_conn: WaylandConnection, host_conn: WaylandConnection, gpu_accel: bool) -> Self {
+    fn new(
+        client_conn: WaylandConnection,
+        host_conn: WaylandConnection,
+        gpu_accel: bool,
+        disable_xdg_decoration: bool,
+    ) -> Self {
         Self {
             client_conn,
             host_conn,
-            ctx: Context::new(gpu_accel),
+            ctx: Context::new(gpu_accel, disable_xdg_decoration),
             handler: SommelierHandler::new(),
         }
     }
@@ -65,7 +74,7 @@ impl Client {
                 res = self.client_conn.recv() => {
                     match res {
                         Ok(bytes) => {
-                            if bytes == 0 && self.client_conn.read_fds.is_empty() { break; }
+                            if bytes == 0 { break; }
                             if !self.handle_msgs(Direction::ClientToHost).await { break; }
                         }
                         Err(_) => break,
@@ -74,7 +83,7 @@ impl Client {
                 res = self.host_conn.recv() => {
                     match res {
                         Ok(bytes) => {
-                            if bytes == 0 && self.host_conn.read_fds.is_empty() { break; }
+                            if bytes == 0 { break; }
                             if !self.handle_msgs(Direction::HostToClient).await { break; }
                         }
                         Err(_) => break,
@@ -89,7 +98,7 @@ impl Client {
         ctx: &mut Context,
         interface: &str,
         msg: &mut WireMessage,
-    ) -> Result<Option<(Vec<u8>, Vec<RawFd>)>, ProtocolError> {
+    ) -> DispatchResult {
         if protocols::wayland::ALLOWED_INTERFACES.contains(&interface) {
             protocols::wayland::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::xdg_shell::ALLOWED_INTERFACES.contains(&interface) {
@@ -100,6 +109,10 @@ impl Client {
             protocols::viewporter::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v3::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v3::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::fractional_scale_v1::dispatch_request(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -110,7 +123,7 @@ impl Client {
         ctx: &mut Context,
         interface: &str,
         msg: &mut WireMessage,
-    ) -> Result<Option<(Vec<u8>, Vec<RawFd>)>, ProtocolError> {
+    ) -> DispatchResult {
         if protocols::wayland::ALLOWED_INTERFACES.contains(&interface) {
             protocols::wayland::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::xdg_shell::ALLOWED_INTERFACES.contains(&interface) {
@@ -121,6 +134,10 @@ impl Client {
             protocols::viewporter::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v3::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v3::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::fractional_scale_v1::dispatch_event(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -145,7 +162,11 @@ impl Client {
             let len = (word2 >> 16) as usize;
             let opcode = (word2 & 0xFFFF) as u16;
 
-            if len < 8 || offset + len > conn.read_buf.len() {
+            if len < 8 {
+                log::error!("Invalid message length: {}", len);
+                return false;
+            }
+            if offset + len > conn.read_buf.len() {
                 break;
             }
 
@@ -167,6 +188,8 @@ impl Client {
                     );
 
                     log::trace!("[{:?}] {}:{} (len={})", direction, interface, opcode, len);
+
+                    self.ctx.last_sender_id = sender_id;
 
                     let res = match direction {
                         Direction::ClientToHost => Self::dispatch_request(
@@ -195,7 +218,7 @@ impl Client {
                     Ok(None)
                 }
             } else {
-                log::warn!(
+                log::debug!(
                     "[{:?}] untracked host id {} opcode {} (len={})",
                     direction,
                     sender_id,
@@ -261,21 +284,21 @@ impl Client {
         }
 
         let mut success = true;
-        if !out_buffer.is_empty() {
-            if other_conn.send(&out_buffer, &out_fds).await.is_err() {
-                success = false;
-            }
-            // Close sent FDs to prevent leak in proxy
-            for fd in out_fds {
-                let _ = nix::unistd::close(fd);
-            }
+        if !out_buffer.is_empty() && other_conn.send(&out_buffer, &out_fds).await.is_err() {
+            success = false;
         }
 
-        // Close consumed FDs from source
-        for fd in conn.read_fds.drain(..fd_offset) {
+        let mut fds_to_close: std::collections::HashSet<std::os::unix::io::RawFd> =
+            std::collections::HashSet::new();
+        fds_to_close.extend(out_fds.iter());
+        fds_to_close.extend(conn.read_fds.iter().take(fd_offset));
+
+        for fd in fds_to_close {
             let _ = nix::unistd::close(fd);
         }
-        // Remove consumed data
+
+        // Remove consumed FDs and data
+        conn.read_fds.drain(..fd_offset);
         conn.read_buf.drain(..offset);
 
         success
@@ -294,7 +317,11 @@ protocols::wayland::impl_sommelier_delegates!(SommelierHandler, {
     wl_region: compositor,
     wl_shm: shm,
     wl_shm_pool: shm,
-    wl_buffer: shm
+    wl_buffer: shm,
+    wl_data_device_manager: data_device,
+    wl_data_device: data_device,
+    wl_data_source: data_device,
+    wl_data_offer: data_device
 });
 impl protocols::wayland::ProtocolHandler for SommelierHandler {}
 
@@ -318,12 +345,33 @@ impl protocols::text_input_unstable_v3::ProtocolHandler for SommelierHandler {}
 protocols::viewporter::impl_sommelier_delegates!(SommelierHandler, {});
 impl protocols::viewporter::ProtocolHandler for SommelierHandler {}
 
+// XDG Decoration Protocol
+protocols::xdg_decoration_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {});
+impl protocols::xdg_decoration_unstable_v1::ProtocolHandler for SommelierHandler {}
+
+// Fractional Scale Protocol
+protocols::fractional_scale_v1::impl_sommelier_delegates!(SommelierHandler, {});
+impl protocols::fractional_scale_v1::ProtocolHandler for SommelierHandler {}
+
 pub async fn run(
     display: &str,
-    use_virtgpu: bool,
     local_compositor: Option<String>,
     gpu_accel: bool,
+    disable_xdg_decoration: bool,
+    virtio_wayland: Option<String>,
 ) {
+    if let Some(path) = &virtio_wayland {
+        if let Err(e) = std::fs::OpenOptions::new().read(true).write(true).open(path) {
+            log::error!("Failed to open virtio-wayland device {}: {}", path, e);
+            std::process::exit(1);
+        }
+    } else if let Some(path) = &local_compositor {
+        if let Err(e) = std::os::unix::net::UnixStream::connect(path) {
+            log::error!("Failed to connect to local compositor socket {}: {}", path, e);
+            std::process::exit(1);
+        }
+    }
+
     let listener = UnixListener::bind(display).expect("Failed to bind socket");
     log::info!("Listening on {}", display);
 
@@ -344,60 +392,72 @@ pub async fn run(
                 }
                 let client_conn = WaylandConnection::new(client_fd);
 
-                let mut virtgpu_channel_ref = None;
+                let mut virtwayland_channel_ref = None;
 
-                let host_conn = if use_virtgpu {
-                    match VirtGpuChannel::new() {
-                        Ok(mut channel) => match channel.init_context() {
-                            Ok(fence) => {
-                                let channel_arc = Arc::new(Mutex::new(channel));
-                                virtgpu_channel_ref = Some(channel_arc.clone());
-                                WaylandConnection::new_virtgpu(channel_arc, fence)
+                let host_conn = {
+                    let mut conn = None;
+
+                    if let Some(path) = &virtio_wayland {
+                        match VirtWaylandChannel::new(path) {
+                            Ok(channel) => {
+                                let channel_arc = Arc::new(channel);
+                                virtwayland_channel_ref = Some(channel_arc.clone());
+                                conn = Some(WaylandConnection::new_virtwayland(channel_arc));
                             }
                             Err(e) => {
-                                log::error!("Failed to init virtgpu context: {}", e);
-                                continue;
+                                log::error!(
+                                    "Failed to open virtio-wayland channel at {}: {}",
+                                    path,
+                                    e
+                                );
                             }
-                        },
-                        Err(e) => {
-                            log::error!("Failed to connect to virtgpu: {}", e);
-                            continue;
                         }
                     }
-                } else {
-                    let path = local_compositor
-                        .as_ref()
-                        .expect("Local compositor path required if not using virtgpu");
-                    match UnixStream::connect(path).await {
-                        Ok(host_stream) => {
-                            let host_fd = host_stream.into_std().unwrap().into_raw_fd();
-                            unsafe {
-                                if let Err(e) = fcntl(
-                                    BorrowedFd::borrow_raw(host_fd),
-                                    FcntlArg::F_SETFL(OFlag::O_NONBLOCK),
-                                ) {
-                                    log::error!("Failed to set non-blocking on host fd: {}", e);
-                                    continue;
+
+                    if conn.is_none() {
+                        if let Some(path) = local_compositor.as_ref() {
+                            match UnixStream::connect(path).await {
+                                Ok(stream) => {
+                                    let host_fd = stream.into_std().unwrap().into_raw_fd();
+                                    unsafe {
+                                        if let Err(e) = fcntl(
+                                            BorrowedFd::borrow_raw(host_fd),
+                                            FcntlArg::F_SETFL(OFlag::O_NONBLOCK),
+                                        ) {
+                                            log::error!(
+                                                "Failed to set non-blocking on host fd: {}",
+                                                e
+                                            );
+                                        } else {
+                                            conn = Some(WaylandConnection::new(host_fd));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to connect to host: {}", e);
                                 }
                             }
-                            WaylandConnection::new(host_fd)
-                        }
-                        Err(e) => {
-                            log::error!("Failed to connect to host: {}", e);
-                            continue;
+                        } else {
+                            log::error!("Local compositor path required if not using virtio-wayland (or if it failed)");
                         }
                     }
+                    conn
                 };
 
-                let mut client = Client::new(client_conn, host_conn, gpu_accel);
-                if let Some(channel) = virtgpu_channel_ref {
-                    client.ctx.virtgpu_channel = Some(channel);
-                }
+                if let Some(host_conn) = host_conn {
+                    let mut client =
+                        Client::new(client_conn, host_conn, gpu_accel, disable_xdg_decoration);
+                    if let Some(channel) = virtwayland_channel_ref {
+                        client.ctx.virtwayland_channel = Some(channel);
+                    }
 
-                tokio::spawn(async move {
-                    client.run().await;
-                    log::info!("Client disconnected");
-                });
+                    tokio::spawn(async move {
+                        client.run().await;
+                        log::info!("Client disconnected");
+                    });
+                } else {
+                    log::error!("Failed to establish host connection, closing client");
+                }
             }
             Err(e) => {
                 log::error!("Accept error: {}", e);

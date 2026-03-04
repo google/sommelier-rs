@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{OwnedFd, RawFd};
-use std::sync::{Arc, Mutex, RwLock}; // Added Mutex
+use std::sync::{Arc, RwLock};
 
 use crate::allocator::Allocator;
-use crate::virtgpu_channel::VirtGpuChannel;
+use crate::virtwl_channel::VirtWaylandChannel;
 use log::warn;
 
 #[allow(dead_code)]
@@ -27,9 +27,16 @@ impl ShadowTable {
     }
 
     pub fn allocate_host_id(&mut self) -> u32 {
-        let id = self.next_host_id;
-        self.next_host_id += 1;
-        id
+        loop {
+            let id = self.next_host_id;
+            self.next_host_id = self.next_host_id.wrapping_add(1);
+            if self.next_host_id < 2 {
+                self.next_host_id = 2; // Prevent 0 (null) and 1 (wl_display)
+            }
+            if !self.host_to_guest.contains_key(&id) {
+                return id;
+            }
+        }
     }
 
     pub fn map_id(&mut self, guest_id: u32, host_id: u32) {
@@ -96,10 +103,11 @@ pub struct PoolState {
 
 impl Drop for PoolState {
     fn drop(&mut self) {
-        if let Ok(inner) = self.inner.write() {
+        if let Ok(mut inner) = self.inner.write() {
             unsafe {
                 if !inner.client_ptr.is_null() && inner.client_ptr != libc::MAP_FAILED {
                     libc::munmap(inner.client_ptr, inner.size);
+                    inner.client_ptr = std::ptr::null_mut();
                 }
             }
         }
@@ -132,12 +140,14 @@ pub struct BufferState {
 }
 
 unsafe impl Send for BufferState {}
+unsafe impl Sync for BufferState {}
 
 impl Drop for BufferState {
     fn drop(&mut self) {
         if !self.dest_ptr.is_null() && self.dest_ptr as *mut libc::c_void != libc::MAP_FAILED {
             unsafe {
                 libc::munmap(self.dest_ptr as *mut libc::c_void, self.dest_size);
+                self.dest_ptr = std::ptr::null_mut();
             }
         }
     }
@@ -165,7 +175,7 @@ pub struct Context {
     pub client_to_host_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
     pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
     pub allocator: Option<Allocator>,
-    pub virtgpu_channel: Option<Arc<Mutex<VirtGpuChannel>>>,
+    pub virtwayland_channel: Option<Arc<VirtWaylandChannel>>,
     pub host_dmabuf_id: Option<u32>,
     pub host_shm_id: Option<u32>,
     pub supported_formats: HashSet<u32>,
@@ -173,10 +183,11 @@ pub struct Context {
     pub pending_params: HashMap<u32, Vec<PendingParam>>,
     pub feedback_index_maps: HashMap<u32, HashMap<u16, u16>>,
     pub gpu_accel: bool,
+    pub disable_xdg_decoration: bool,
 }
 
 impl Context {
-    pub fn new(gpu_accel: bool) -> Self {
+    pub fn new(gpu_accel: bool, disable_xdg_decoration: bool) -> Self {
         // Initialize allocator
         let allocator = match Allocator::new() {
             Ok(alloc) => Some(alloc),
@@ -195,7 +206,7 @@ impl Context {
             client_to_host_queue: Vec::new(),
             host_to_client_queue: Vec::new(),
             allocator,
-            virtgpu_channel: None,
+            virtwayland_channel: None,
             host_dmabuf_id: None,
             host_shm_id: None,
             supported_formats: HashSet::new(),
@@ -203,12 +214,13 @@ impl Context {
             pending_params: HashMap::new(),
             feedback_index_maps: HashMap::new(),
             gpu_accel,
+            disable_xdg_decoration,
         }
     }
 }
 
 impl Default for Context {
     fn default() -> Self {
-        Self::new(false)
+        Self::new(false, false)
     }
 }

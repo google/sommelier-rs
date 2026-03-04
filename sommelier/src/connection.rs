@@ -1,11 +1,11 @@
-use crate::virtgpu_channel::{spawn_virtgpu_actor, VirtGpuChannel};
+use crate::virtwl_channel::VirtWaylandChannel;
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
 use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::io::RawFd;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::mpsc::{Receiver, Sender};
 
 pub struct WaylandConnection {
     transport: ConnectionTransport,
@@ -15,16 +15,23 @@ pub struct WaylandConnection {
 
 enum ConnectionTransport {
     Unix(AsyncFd<OwnedFd>),
-    VirtGpu {
-        tx: Sender<(Vec<u8>, Vec<OwnedFd>)>,
-        rx: Receiver<(Vec<u8>, Vec<OwnedFd>)>,
-    },
+    VirtWayland(Arc<VirtWaylandChannel>),
 }
 
 impl WaylandConnection {
     pub fn new(fd: RawFd) -> Self {
         // Safety: We assume we own the fd passed in
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+
+        // Ensure non-blocking mode for AsyncFd
+        let raw_fd = owned.as_raw_fd();
+        unsafe {
+            let borrowed_fd = std::os::fd::BorrowedFd::borrow_raw(raw_fd);
+            let flags_int = fcntl(borrowed_fd, FcntlArg::F_GETFL).unwrap_or(0);
+            let flags = OFlag::from_bits_truncate(flags_int);
+            let _ = fcntl(borrowed_fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
+        }
+
         Self {
             transport: ConnectionTransport::Unix(
                 AsyncFd::new(owned).expect("Failed to create AsyncFd"),
@@ -34,10 +41,9 @@ impl WaylandConnection {
         }
     }
 
-    pub fn new_virtgpu(channel: Arc<Mutex<VirtGpuChannel>>, initial_fence: OwnedFd) -> Self {
-        let (tx, rx) = spawn_virtgpu_actor(channel, initial_fence);
+    pub fn new_virtwayland(channel: Arc<VirtWaylandChannel>) -> Self {
         Self {
-            transport: ConnectionTransport::VirtGpu { tx, rx },
+            transport: ConnectionTransport::VirtWayland(channel),
             read_buf: Vec::new(),
             read_fds: Vec::new(),
         }
@@ -97,20 +103,7 @@ impl WaylandConnection {
                 }
                 Ok(())
             }
-            ConnectionTransport::VirtGpu { tx, .. } => {
-                let owned_fds: Vec<OwnedFd> = fds
-                    .iter()
-                    .map(|&fd| {
-                        // We need to borrow the RawFd to pass to dup
-                        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-                        nix::unistd::dup(borrowed).map_err(io::Error::from)
-                    })
-                    .collect::<io::Result<Vec<OwnedFd>>>()?;
-
-                tx.send((data.to_vec(), owned_fds))
-                    .await
-                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "VirtGpu actor died"))
-            }
+            ConnectionTransport::VirtWayland(channel) => channel.send(data, fds).await,
         }
     }
 
@@ -156,20 +149,13 @@ impl WaylandConnection {
                     }
                 }
             }
-            ConnectionTransport::VirtGpu { rx, .. } => {
-                match rx.recv().await {
-                    Some((data, fds)) => {
-                        let len = data.len();
-                        self.read_buf.extend(data);
-                        self.read_fds
-                            .extend(fds.into_iter().map(|fd| fd.into_raw_fd()));
-                        Ok(len)
-                    }
-                    None => {
-                        // Channel closed
-                        Ok(0)
-                    }
-                }
+            ConnectionTransport::VirtWayland(channel) => {
+                let (data, fds) = channel.recv().await?;
+                let len = data.len();
+                self.read_buf.extend(data);
+                self.read_fds
+                    .extend(fds.into_iter().map(|fd| fd.into_raw_fd()));
+                Ok(len)
             }
         }
     }
@@ -179,7 +165,7 @@ impl AsRawFd for WaylandConnection {
     fn as_raw_fd(&self) -> RawFd {
         match &self.transport {
             ConnectionTransport::Unix(fd) => fd.as_raw_fd(),
-            ConnectionTransport::VirtGpu { .. } => -1,
+            ConnectionTransport::VirtWayland(_) => -1,
         }
     }
 }

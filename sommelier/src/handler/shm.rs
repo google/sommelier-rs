@@ -92,48 +92,40 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
         };
 
         debug!("Allocator present={}", ctx.allocator.is_some());
-        debug!("VirtGpu channel present={}", ctx.virtgpu_channel.is_some());
+        debug!(
+            "VirtWayland channel present={}",
+            ctx.virtwayland_channel.is_some()
+        );
 
-        // Allocate buffer (VirtGpu Blob or GBM)
-        let (bo, bo_stride, dmabuf_fd_owned, _modifier, blob_offset, total_size) =
-            if let Some(channel) = &mut ctx.virtgpu_channel {
-                // FIX: Force hardware block alignment (64 pixels = 256 bytes for 32bpp)
-                // This guarantees the host allocator returns a Mesa-compatible stride (e.g., 1024)
-                let aligned_width = (width + 63) & !63;
-                let aligned_height = (height + 63) & !63;
-
-                let drm_format = Self::wl_shm_format_to_drm_format(format);
-
-                debug!(
-                    "Allocating VirtGpu host blob: {}x{}, format={:#010x}",
-                    width, height, drm_format
-                );
-                // Lock the mutex to access the channel
-                match channel.lock().unwrap().allocate_host_blob(
-                    aligned_width as u32,
-                    aligned_height as u32,
-                    drm_format,
-                ) {
-                    Ok((fd, allocated_stride, modifier, offset, size)) => {
-                        // Use returned stride
-                        debug!(
-                        "Allocated VirtGpu blob: fd={}, stride={}, modifier={}, offset={}, size={}",
-                        fd.as_raw_fd(),
-                        allocated_stride,
-                        modifier,
-                        offset,
-                        size
-                    );
-                        (None, allocated_stride, fd, modifier, offset, size)
-                    }
-                    Err(e) => {
-                        error!("Failed to allocate VirtGpu host blob: {}", e);
-                        return Action::Drop;
-                    }
+        // Allocate buffer (GBM or VirtWayland)
+        let alloc_res = if let Some(channel) = &ctx.virtwayland_channel {
+            let size = (stride as u32) * (height as u32);
+            debug!("Allocating VirtWayland buffer: size={}", size);
+            match channel.allocate(size) {
+                Ok((fd, _alloc_size)) => {
+                    // virtwl allocation is a simple SHM-like buffer.
+                    // No modifier, offset 0.
+                    Some((None, stride as u32, fd, 0, 0, size as u64))
                 }
+                Err(e) => {
+                    error!("Failed to allocate VirtWayland buffer: {}", e);
+                    return Action::Drop;
+                }
+            }
+        } else {
+            None
+        };
+
+        let (bo, bo_stride, dmabuf_fd_owned, _modifier, blob_offset, total_size) =
+            if let Some(res) = alloc_res {
+                res
             } else if let Some(allocator) = &mut ctx.allocator {
                 // Fallback to GBM allocator
-                match allocator.allocate(width as u32, height as u32, format) {
+                match allocator.allocate(
+                    width as u32,
+                    height as u32,
+                    Self::wl_shm_format_to_drm_format(format),
+                ) {
                     Ok(bo) => {
                         let bo_stride = bo.stride().unwrap_or(0);
                         debug!(
@@ -209,7 +201,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             let mut full_msg = Vec::new();
             full_msg.extend_from_slice(&host_wl_shm_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 0_u32; // wl_shm.create_pool = 0
+            let word2 = len << 16; // wl_shm.create_pool = 0
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
@@ -231,7 +223,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             let host_buffer_id = ctx.shadow_table.allocate_host_id();
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_buffer_id);
-            builder.write_i32(blob_offset as i32); // offset
+            builder.write_i32(blob_offset); // offset
             builder.write_i32(width);
             builder.write_i32(height);
             builder.write_i32(bo_stride as i32); // stride
@@ -240,7 +232,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             let mut full_msg = Vec::new();
             full_msg.extend_from_slice(&host_pool_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 0_u32; // wl_shm_pool.create_buffer = 0
+            let word2 = len << 16; // wl_shm_pool.create_buffer = 0
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
@@ -340,7 +332,7 @@ impl protocols::wayland::wl_buffer::WlBufferHandler for ShmHandler {
             full_msg.extend_from_slice(&host_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
             // REQ_DESTROY is 0 for wl_buffer
-            let word2 = (len << 16) | 0_u32;
+            let word2 = len << 16;
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 

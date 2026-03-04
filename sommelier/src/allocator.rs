@@ -54,9 +54,14 @@ impl Allocator {
             val => {
                 // If the value is large, it might be a FourCC code already (e.g. from dmabuf).
                 // However, small values are likely Wayland SHM formats we don't support yet.
-                // We'll try to transmute if it looks like a FourCC (usually ASCII chars).
+                // We'll try to parse it if it looks like a FourCC (usually ASCII chars).
                 if val > 0xff {
-                    unsafe { std::mem::transmute(val) }
+                    gbm::Format::try_from(val).map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("Invalid format: {}", e),
+                        )
+                    })?
                 } else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,

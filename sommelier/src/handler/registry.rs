@@ -1,9 +1,11 @@
+use crate::protocols::fractional_scale_v1::ALLOWED_INTERFACES as FRACTIONAL_SCALE_ALLOWED;
 use crate::protocols::linux_dmabuf_v1::ALLOWED_INTERFACES as DMABUF_ALLOWED;
 use crate::protocols::text_input_unstable_v3::ALLOWED_INTERFACES as TEXT_INPUT_ALLOWED;
 use crate::protocols::viewporter::ALLOWED_INTERFACES as VIEWPORTER_ALLOWED;
 use crate::protocols::wayland::wl_registry;
 use crate::protocols::wayland::wl_shm;
 use crate::protocols::wayland::ALLOWED_INTERFACES as WL_ALLOWED;
+use crate::protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES as XDG_DECORATION_ALLOWED;
 use crate::protocols::xdg_shell::ALLOWED_INTERFACES as XDG_ALLOWED;
 use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
@@ -104,6 +106,9 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             && !DMABUF_ALLOWED.contains(&interface.as_str())
             && !VIEWPORTER_ALLOWED.contains(&interface.as_str())
             && !TEXT_INPUT_ALLOWED.contains(&interface.as_str())
+            && (!XDG_DECORATION_ALLOWED.contains(&interface.as_str()) || ctx.disable_xdg_decoration)
+            && !FRACTIONAL_SCALE_ALLOWED.contains(&interface.as_str())
+            && interface != "wl_data_device_manager"
         {
             return Action::Drop;
         }
