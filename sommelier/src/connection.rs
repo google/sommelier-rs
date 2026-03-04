@@ -1,0 +1,185 @@
+use crate::virtgpu_channel::{spawn_virtgpu_actor, VirtGpuChannel};
+use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
+use std::io::{self, IoSlice, IoSliceMut};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::unix::io::RawFd;
+use std::sync::{Arc, Mutex};
+use tokio::io::unix::AsyncFd;
+use tokio::sync::mpsc::{Receiver, Sender};
+
+pub struct WaylandConnection {
+    transport: ConnectionTransport,
+    pub read_buf: Vec<u8>,
+    pub read_fds: Vec<RawFd>,
+}
+
+enum ConnectionTransport {
+    Unix(AsyncFd<OwnedFd>),
+    VirtGpu {
+        tx: Sender<(Vec<u8>, Vec<OwnedFd>)>,
+        rx: Receiver<(Vec<u8>, Vec<OwnedFd>)>,
+    },
+}
+
+impl WaylandConnection {
+    pub fn new(fd: RawFd) -> Self {
+        // Safety: We assume we own the fd passed in
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        Self {
+            transport: ConnectionTransport::Unix(
+                AsyncFd::new(owned).expect("Failed to create AsyncFd"),
+            ),
+            read_buf: Vec::new(),
+            read_fds: Vec::new(),
+        }
+    }
+
+    pub fn new_virtgpu(channel: Arc<Mutex<VirtGpuChannel>>, initial_fence: OwnedFd) -> Self {
+        let (tx, rx) = spawn_virtgpu_actor(channel, initial_fence);
+        Self {
+            transport: ConnectionTransport::VirtGpu { tx, rx },
+            read_buf: Vec::new(),
+            read_fds: Vec::new(),
+        }
+    }
+
+    pub async fn send(&mut self, data: &[u8], fds: &[RawFd]) -> io::Result<()> {
+        if data.is_empty() && fds.is_empty() {
+            return Ok(());
+        }
+
+        match &mut self.transport {
+            ConnectionTransport::Unix(fd) => {
+                let mut data_offset = 0;
+                let mut fds_to_send = fds;
+
+                while data_offset < data.len() || !fds_to_send.is_empty() {
+                    let mut guard = fd.writable().await?;
+
+                    let remaining_data = &data[data_offset..];
+                    let iov = [IoSlice::new(remaining_data)];
+
+                    let cmsgs = if !fds_to_send.is_empty() {
+                        vec![ControlMessage::ScmRights(fds_to_send)]
+                    } else {
+                        vec![]
+                    };
+
+                    let result = guard.try_io(|inner| {
+                        sendmsg::<()>(
+                            inner.get_ref().as_raw_fd(),
+                            &iov,
+                            &cmsgs,
+                            MsgFlags::empty(),
+                            None,
+                        )
+                        .map_err(io::Error::from)
+                    });
+
+                    match result {
+                        Ok(Ok(bytes_sent)) => {
+                            // If sendmsg succeeds, FDs (if any) are sent.
+                            // We must ensure we don't send them again in a retry loop.
+                            fds_to_send = &[];
+
+                            data_offset += bytes_sent;
+
+                            if bytes_sent == 0 && !remaining_data.is_empty() {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::WriteZero,
+                                    "failed to write whole buffer",
+                                ));
+                            }
+                        }
+                        Ok(Err(e)) => return Err(e),
+                        Err(_would_block) => continue,
+                    }
+                }
+                Ok(())
+            }
+            ConnectionTransport::VirtGpu { tx, .. } => {
+                let owned_fds: Vec<OwnedFd> = fds
+                    .iter()
+                    .map(|&fd| {
+                        // We need to borrow the RawFd to pass to dup
+                        let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+                        nix::unistd::dup(borrowed).map_err(io::Error::from)
+                    })
+                    .collect::<io::Result<Vec<OwnedFd>>>()?;
+
+                tx.send((data.to_vec(), owned_fds))
+                    .await
+                    .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "VirtGpu actor died"))
+            }
+        }
+    }
+
+    pub async fn recv(&mut self) -> io::Result<usize> {
+        match &mut self.transport {
+            ConnectionTransport::Unix(fd) => {
+                let mut buf = [0u8; 4096];
+                let mut cmsg_space = nix::cmsg_space!([RawFd; 32]);
+
+                loop {
+                    let mut guard = fd.readable().await?;
+
+                    let result = guard.try_io(|inner| {
+                        let mut iov = [IoSliceMut::new(&mut buf)];
+                        match recvmsg::<()>(
+                            inner.get_ref().as_raw_fd(),
+                            &mut iov,
+                            Some(&mut cmsg_space),
+                            MsgFlags::empty(),
+                        ) {
+                            Ok(msg) => {
+                                let bytes = msg.bytes;
+                                let mut fds = Vec::new();
+                                for cmsg in msg.cmsgs().map_err(io::Error::other)? {
+                                    if let ControlMessageOwned::ScmRights(recv_fds) = cmsg {
+                                        fds.extend(recv_fds.into_iter().map(|o| o.into_raw_fd()));
+                                    }
+                                }
+                                Ok((bytes, fds))
+                            }
+                            Err(e) => Err(io::Error::from(e)),
+                        }
+                    });
+
+                    match result {
+                        Ok(Ok((bytes, fds))) => {
+                            self.read_buf.extend_from_slice(&buf[..bytes]);
+                            self.read_fds.extend(fds);
+                            return Ok(bytes);
+                        }
+                        Ok(Err(e)) => return Err(e),
+                        Err(_would_block) => continue,
+                    }
+                }
+            }
+            ConnectionTransport::VirtGpu { rx, .. } => {
+                match rx.recv().await {
+                    Some((data, fds)) => {
+                        let len = data.len();
+                        self.read_buf.extend(data);
+                        self.read_fds
+                            .extend(fds.into_iter().map(|fd| fd.into_raw_fd()));
+                        Ok(len)
+                    }
+                    None => {
+                        // Channel closed
+                        Ok(0)
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl AsRawFd for WaylandConnection {
+    fn as_raw_fd(&self) -> RawFd {
+        match &self.transport {
+            ConnectionTransport::Unix(fd) => fd.as_raw_fd(),
+            ConnectionTransport::VirtGpu { .. } => -1,
+        }
+    }
+}

@@ -1,0 +1,214 @@
+use std::collections::{HashMap, HashSet};
+use std::os::unix::io::{OwnedFd, RawFd};
+use std::sync::{Arc, Mutex, RwLock}; // Added Mutex
+
+use crate::allocator::Allocator;
+use crate::virtgpu_channel::VirtGpuChannel;
+use log::warn;
+
+#[allow(dead_code)]
+pub struct ShadowTable {
+    guest_to_host: HashMap<u32, u32>,
+    host_to_guest: HashMap<u32, u32>,
+    interfaces: HashMap<u32, String>,
+    next_host_id: u32,
+}
+
+impl ShadowTable {
+    pub fn new() -> Self {
+        Self {
+            guest_to_host: HashMap::new(),
+            host_to_guest: HashMap::new(),
+            interfaces: HashMap::new(),
+            // Start at 2 to mimic standard Wayland client behavior.
+            // ID 1 is reserved for wl_display.
+            next_host_id: 2,
+        }
+    }
+
+    pub fn allocate_host_id(&mut self) -> u32 {
+        let id = self.next_host_id;
+        self.next_host_id += 1;
+        id
+    }
+
+    pub fn map_id(&mut self, guest_id: u32, host_id: u32) {
+        self.guest_to_host.insert(guest_id, host_id);
+        self.host_to_guest.insert(host_id, guest_id);
+    }
+
+    pub fn get_host_id(&self, guest_id: u32) -> Option<u32> {
+        self.guest_to_host.get(&guest_id).cloned()
+    }
+
+    pub fn get_guest_id(&self, host_id: u32) -> Option<u32> {
+        self.host_to_guest.get(&host_id).cloned()
+    }
+
+    pub fn track_interface(&mut self, guest_id: u32, interface: String) {
+        self.interfaces.insert(guest_id, interface);
+    }
+
+    pub fn get_interface(&self, guest_id: u32) -> Option<&String> {
+        self.interfaces.get(&guest_id)
+    }
+
+    pub fn remove_id(&mut self, guest_id: u32) {
+        if let Some(host_id) = self.guest_to_host.remove(&guest_id) {
+            self.host_to_guest.remove(&host_id);
+        }
+        self.interfaces.remove(&guest_id);
+    }
+
+    #[allow(dead_code)]
+    pub fn find_by_interface(&self, interface_name: &str) -> Vec<u32> {
+        self.interfaces
+            .iter()
+            .filter_map(|(id, name)| {
+                if name == interface_name {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+impl Default for ShadowTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct PoolInner {
+    pub client_ptr: *mut libc::c_void,
+    pub size: usize,
+}
+
+unsafe impl Send for PoolInner {}
+unsafe impl Sync for PoolInner {}
+
+pub struct PoolState {
+    pub client_fd: RawFd,
+    pub inner: RwLock<PoolInner>,
+}
+
+impl Drop for PoolState {
+    fn drop(&mut self) {
+        if let Ok(inner) = self.inner.write() {
+            unsafe {
+                if !inner.client_ptr.is_null() && inner.client_ptr != libc::MAP_FAILED {
+                    libc::munmap(inner.client_ptr, inner.size);
+                }
+            }
+        }
+        unsafe {
+            if self.client_fd >= 0 {
+                libc::close(self.client_fd);
+            }
+        }
+    }
+}
+
+pub struct BufferState {
+    pub pool: Arc<PoolState>,
+    pub offset: i32,
+    #[allow(dead_code)]
+    pub width: i32,
+    pub height: i32,
+    pub stride: u32,
+    #[allow(dead_code)]
+    pub format: u32,
+    #[allow(dead_code)]
+    pub host_buffer_id: u32,
+    #[allow(dead_code)]
+    pub bo: Option<gbm::BufferObject<()>>,
+    #[allow(dead_code)]
+    pub dmabuf_fd: Option<OwnedFd>,
+    pub bo_stride: u32,
+    pub dest_ptr: *mut u8,
+    pub dest_size: usize,
+}
+
+unsafe impl Send for BufferState {}
+
+impl Drop for BufferState {
+    fn drop(&mut self) {
+        if !self.dest_ptr.is_null() && self.dest_ptr as *mut libc::c_void != libc::MAP_FAILED {
+            unsafe {
+                libc::munmap(self.dest_ptr as *mut libc::c_void, self.dest_size);
+            }
+        }
+    }
+}
+
+pub struct SurfaceState {
+    pub pending_buffer_id: Option<u32>,
+}
+
+pub struct PendingParam {
+    pub fd: RawFd,
+    pub plane_idx: u32,
+    pub offset: u32,
+    pub stride: u32,
+    pub modifier_hi: u32,
+    pub modifier_lo: u32,
+}
+
+pub struct Context {
+    pub shadow_table: ShadowTable,
+    pub pools: HashMap<u32, Arc<PoolState>>,
+    pub buffers: HashMap<u32, BufferState>,
+    pub surfaces: HashMap<u32, SurfaceState>,
+    pub last_sender_id: u32,
+    pub client_to_host_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
+    pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
+    pub allocator: Option<Allocator>,
+    pub virtgpu_channel: Option<Arc<Mutex<VirtGpuChannel>>>,
+    pub host_dmabuf_id: Option<u32>,
+    pub host_shm_id: Option<u32>,
+    pub supported_formats: HashSet<u32>,
+    pub host_globals: HashMap<String, u32>,
+    pub pending_params: HashMap<u32, Vec<PendingParam>>,
+    pub feedback_index_maps: HashMap<u32, HashMap<u16, u16>>,
+    pub gpu_accel: bool,
+}
+
+impl Context {
+    pub fn new(gpu_accel: bool) -> Self {
+        // Initialize allocator
+        let allocator = match Allocator::new() {
+            Ok(alloc) => Some(alloc),
+            Err(e) => {
+                warn!("Failed to initialize GBM allocator: {}", e);
+                None
+            }
+        };
+
+        Self {
+            shadow_table: ShadowTable::new(),
+            pools: HashMap::new(),
+            buffers: HashMap::new(),
+            surfaces: HashMap::new(),
+            last_sender_id: 0,
+            client_to_host_queue: Vec::new(),
+            host_to_client_queue: Vec::new(),
+            allocator,
+            virtgpu_channel: None,
+            host_dmabuf_id: None,
+            host_shm_id: None,
+            supported_formats: HashSet::new(),
+            host_globals: HashMap::new(),
+            pending_params: HashMap::new(),
+            feedback_index_maps: HashMap::new(),
+            gpu_accel,
+        }
+    }
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}

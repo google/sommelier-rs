@@ -1,0 +1,10 @@
+[package]
+name = "wayland_codegen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+proc-macro2 = "1.0.106"
+quick-xml = { version = "0.39.0", features = ["serialize"] }
+quote = "1.0.44"
+serde = { version = "1.0.228", features = ["derive"] }

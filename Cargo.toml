@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "wayland_codegen",
+    "sommelier",
+]
+resolver = "2"
