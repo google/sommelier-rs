@@ -8,13 +8,13 @@ fn main() {
     let out_dir = env::var_os("OUT_DIR").unwrap();
 
     let protocols = [
-        ("wayland", "../protocols/wayland.xml"),
-        ("xdg_shell", "../protocols/xdg-shell.xml"),
-        ("linux_dmabuf_v1", "../protocols/linux-dmabuf-v1.xml"),
-        ("viewporter", "../protocols/viewporter.xml"),
+        ("wayland", "../third_party/protocols/wayland.xml"),
+        ("xdg_shell", "../third_party/protocols/xdg-shell.xml"),
+        ("linux_dmabuf_v1", "../third_party/protocols/linux-dmabuf-v1.xml"),
+        ("viewporter", "../third_party/protocols/viewporter.xml"),
         (
             "text-input-unstable-v3",
-            "../protocols/text-input-unstable-v3.xml",
+            "../third_party/protocols/text-input-unstable-v3.xml",
         ),
     ];
 

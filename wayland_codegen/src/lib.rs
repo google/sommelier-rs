@@ -23,7 +23,7 @@ mod tests {
     #[test]
     fn test_parse_wayland() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let protocol_path = manifest_dir.join("../protocols/wayland.xml");
+        let protocol_path = manifest_dir.join("../third_party/protocols/wayland.xml");
         let protocol = parse(protocol_path).expect("Failed to parse wayland.xml");
         assert_eq!(protocol.name, "wayland");
 
@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn test_generate_wayland() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let protocol_path = manifest_dir.join("../protocols/wayland.xml");
+        let protocol_path = manifest_dir.join("../third_party/protocols/wayland.xml");
         let protocol = parse(protocol_path).expect("Failed to parse wayland.xml");
         let code = generator::generate(&protocol);
         assert!(code.contains("pub mod wl_display"));
