@@ -1,18 +1,27 @@
+/*
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+     https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 use crate::protocol::*;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 pub fn generate(protocol: &Protocol) -> String {
     let mut parts = Vec::new();
-
-    for item in &protocol.items {
-        if let ProtocolItem::Interface(interface) = item {
-            parts.push(generate_interface(interface));
-        }
-    }
-
-    let protocol_name = format_ident!("{}", protocol.name);
-
     let mut interface_names = Vec::new();
     let mut handler_trait_names = Vec::new();
     let mut dispatch_request_cases = Vec::new();
@@ -33,9 +42,12 @@ pub fn generate(protocol: &Protocol) -> String {
             dispatch_event_cases.push(quote! {
                 #name => #mod_name::dispatch_event(msg, handler, ctx),
             });
+
+            parts.push(generate_interface(interface));
         }
     }
 
+    let protocol_name = format_ident!("{}", protocol.name);
     let delegation_macro = generate_delegation_macro(protocol);
 
     let expanded = quote! {
@@ -47,6 +59,8 @@ pub fn generate(protocol: &Protocol) -> String {
             #![allow(unused_variables)]
             #![allow(clippy::match_single_binding)]
             #![allow(clippy::too_many_arguments)]
+            #![allow(clippy::type_complexity)]
+            #![allow(clippy::single_match)]
 
             use std::os::unix::io::RawFd;
             use crate::wire::{WireMessage, MessageBuilder, Action, ProtocolError};
@@ -92,7 +106,27 @@ pub fn generate(protocol: &Protocol) -> String {
         }
     };
 
-    expanded.to_string()
+    format_rust_code(&expanded.to_string())
+}
+
+fn format_rust_code(code: &str) -> String {
+    if let Ok(mut child) = Command::new("rustfmt")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(code.as_bytes());
+        }
+        if let Ok(output) = child.wait_with_output()
+            && output.status.success()
+            && let Ok(formatted) = String::from_utf8(output.stdout)
+        {
+            return formatted;
+        }
+    }
+    code.to_string()
 }
 
 fn map_type(arg: &Arg) -> TokenStream {
@@ -243,10 +277,25 @@ fn generate_interface(interface: &Interface) -> TokenStream {
 
                         match arg.typ.as_str() {
                             "object" => {
-                                mapping_and_writing.push(quote! {
-                                    let host_id = ctx.shadow_table.get_host_id(#name).unwrap_or(0);
-                                    builder.write_u32(host_id);
-                                });
+                                let is_nullable = arg.allow_null.unwrap_or(false);
+                                if is_nullable {
+                                    mapping_and_writing.push(quote! {
+                                        let host_id = ctx.shadow_table.get_host_id(#name).unwrap_or(0);
+                                        builder.write_u32(host_id);
+                                    });
+                                } else {
+                                    let arg_name_str = &arg.name;
+                                    let req_name_str = &req.name;
+                                    mapping_and_writing.push(quote! {
+                                        let host_id = if let Some(id) = ctx.shadow_table.get_host_id(#name) {
+                                            id
+                                        } else {
+                                            log::debug!("Dropping request {} due to missing mapping for non-nullable argument {}", #req_name_str, #arg_name_str);
+                                            return Ok(None);
+                                        };
+                                        builder.write_u32(host_id);
+                                    });
+                                }
                             }
                             "new_id" => {
                                 if let Some(ref interface_name) = arg.interface {
@@ -355,7 +404,7 @@ fn generate_interface(interface: &Interface) -> TokenStream {
 
                         match arg.typ.as_str() {
                             "object" => {
-                                let is_nullable = arg.allow_null.as_deref() == Some("true");
+                                let is_nullable = arg.allow_null.unwrap_or(false);
                                 if is_nullable {
                                     mapping_and_writing.push(quote! {
                                         let guest_id = ctx.shadow_table.get_guest_id(#name).unwrap_or(0);
@@ -368,7 +417,7 @@ fn generate_interface(interface: &Interface) -> TokenStream {
                                         let guest_id = if let Some(id) = ctx.shadow_table.get_guest_id(#name) {
                                             id
                                         } else {
-                                            log::warn!("Dropping event {} due to missing mapping for non-nullable argument {}", #evt_name_str, #arg_name_str);
+                                            log::debug!("Dropping event {} due to missing mapping for non-nullable argument {}", #evt_name_str, #arg_name_str);
                                             return Ok(None);
                                         };
                                         builder.write_u32(guest_id);
@@ -376,9 +425,17 @@ fn generate_interface(interface: &Interface) -> TokenStream {
                                 }
                             }
                             "new_id" => {
-                                mapping_and_writing.push(quote! {
-                                    builder.write_u32(#name);
-                                });
+                                if let Some(ref interface_name) = arg.interface {
+                                    mapping_and_writing.push(quote! {
+                                        ctx.shadow_table.map_id(#name, #name);
+                                        ctx.shadow_table.track_interface(#name, #interface_name.to_string());
+                                        builder.write_u32(#name);
+                                    });
+                                } else {
+                                    mapping_and_writing.push(quote! {
+                                        builder.write_u32(#name);
+                                    });
+                                }
                             }
                             _ => {
                                 let write_call = map_write_fn(arg, &name);
@@ -512,75 +569,7 @@ fn generate_interface(interface: &Interface) -> TokenStream {
 fn generate_delegation_macro(protocol: &Protocol) -> TokenStream {
     let mut dispatch_arms = Vec::new();
     let mut entry_point_calls = Vec::new();
-
-    for item in &protocol.items {
-        if let ProtocolItem::Interface(interface) = item {
-            let iface_name = &interface.name;
-            let iface_ident = format_ident!("{}", iface_name);
-            let mod_name = format_ident!("{}", iface_name);
-            let handler_trait_name = format_ident!("{}Handler", snake_to_camel(iface_name));
-
-            // Entry point call
-            entry_point_calls.push(quote! {
-                $crate::protocols::#mod_name::impl_sommelier_delegates!(@dispatch $target, #iface_ident, [ $($iface : $field,)* ]);
-            });
-
-            let mut method_impls = Vec::new();
-            for item in &interface.items {
-                let (name, args_items) = match item {
-                    InterfaceItem::Request(req) => (&req.name, &req.items),
-                    InterfaceItem::Event(evt) => (&evt.name, &evt.items),
-                    _ => continue,
-                };
-
-                let method_name = format_ident!("on_{}", name);
-                let sig_args = generate_handler_args_fq(args_items);
-                let call_args = generate_forwarding_call_args(args_items);
-
-                method_impls.push(quote! {
-                     fn #method_name(&mut self, ctx: &mut $crate::state::Context, #sig_args) -> $crate::wire::Action {
-                         self.$field.#method_name(ctx, #call_args)
-                     }
-                 });
-            }
-
-            // Dispatch arms
-            dispatch_arms.push(quote! {
-                (@dispatch $target:ty, #iface_ident, [ #iface_ident : $field:ident, $($rest:tt)* ]) => {
-                    impl $crate::protocols::#mod_name::#handler_trait_name for $target {
-                        #(#method_impls)*
-                    }
-                };
-                (@dispatch $target:ty, #iface_ident, [ $other:ident : $field:ident, $($rest:tt)* ]) => {
-                    $crate::protocols::#mod_name::impl_sommelier_delegates!(@dispatch $target, #iface_ident, [ $($rest)* ]);
-                };
-                (@dispatch $target:ty, #iface_ident, []) => {
-                    impl $crate::protocols::#mod_name::#handler_trait_name for $target {}
-                };
-            });
-        }
-    }
-
-    // Note: I am assuming `protocols` is the module path based on analysis.
-    // If it's not, the macro path logic here `$crate::protocols::...` might need adjustment.
-    // But since I'm generating `pub(crate) use` below, I can use the local path if I put it in `pub mod #protocol_name`.
-    // Wait, the macro is defined inside `pub mod #protocol_name` (which becomes `mod wayland`).
-    // If I put it there, the path to itself is `$crate::protocols::wayland::impl_sommelier_delegates`.
-    // The previous logic used `#mod_name` which is the interface name (e.g. `wl_display`).
-    // This is confusing.
-    // `protocol.items` contains interfaces. `mod_name` in loop is interface module (e.g. `wl_display`).
-    // The top-level module is `wayland`.
-    // The macro should be defined at the top-level of the generated code (inside `mod wayland`).
-    // So the macro is `$crate::protocols::wayland::impl_sommelier_delegates`.
-    // Inside the macro, when I refer to `mod_name` (interface), it is `$crate::protocols::wayland::wl_display`.
-    // Wait, I am using `$crate::protocols::#mod_name`. If `#mod_name` is interface, this is missing the protocol module.
-    // It should be `$crate::protocols::#protocol_name::#mod_name`.
-
     let protocol_name = format_ident!("{}", protocol.name);
-
-    // Re-generate dispatch arms with correct path
-    let mut dispatch_arms = Vec::new();
-    let mut entry_point_calls = Vec::new();
 
     for item in &protocol.items {
         if let ProtocolItem::Interface(interface) = item {
@@ -738,17 +727,13 @@ fn sanitize_ident(name: &str) -> Ident {
 }
 
 fn snake_to_camel(s: &str) -> String {
-    let mut out = String::new();
-    let mut next_upper = true;
-    for c in s.chars() {
-        if c == '_' {
-            next_upper = true;
-        } else if next_upper {
-            out.push(c.to_ascii_uppercase());
-            next_upper = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    s.split('_')
+        .map(|word| {
+            let mut c = word.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            }
+        })
+        .collect()
 }
