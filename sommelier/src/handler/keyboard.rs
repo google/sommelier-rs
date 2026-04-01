@@ -24,23 +24,25 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     fn on_enter(
         &mut self,
         ctx: &mut Context,
-        serial: u32,
-        surface: u32,
-        keys: &[u8],
+        _serial: u32,
+        surface: u32, // Host ID
+        _keys: &[u8],
     ) -> Action {
-        let guest_keyboard_id = ctx.last_sender_id;
+        let host_keyboard_id = ctx.last_sender_id;
+        let guest_keyboard_id = ctx.shadow_table.get_guest_id(host_keyboard_id).unwrap_or(0);
+        let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
         
         if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
-            ctx.active_surface_for_seat.insert(guest_seat_id, surface);
+            ctx.active_surface_for_seat.insert(guest_seat_id, guest_surface_id);
 
             // Find the v3 text input for this seat
             for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
                 if state.guest_seat == guest_seat_id {
-                    state.active_surface = Some(surface);
+                    state.active_surface = Some(guest_surface_id);
                     
                     // Send zwp_text_input_v3.enter (opcode 0)
                     let mut builder = crate::wire::MessageBuilder::new();
-                    builder.write_u32(surface);
+                    builder.write_u32(guest_surface_id);
                     
                     let mut msg = Vec::new();
                     msg.extend_from_slice(&guest_text_input_id.to_ne_bytes());
@@ -56,8 +58,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         Action::Forward
     }
 
-    fn on_leave(&mut self, ctx: &mut Context, serial: u32, surface: u32) -> Action {
-        let guest_keyboard_id = ctx.last_sender_id;
+    fn on_leave(&mut self, ctx: &mut Context, _serial: u32, surface: u32) -> Action {
+        let host_keyboard_id = ctx.last_sender_id;
+        let guest_keyboard_id = ctx.shadow_table.get_guest_id(host_keyboard_id).unwrap_or(0);
+        let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
         
         if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
             ctx.active_surface_for_seat.remove(&guest_seat_id);
@@ -69,7 +73,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                     
                     // Send zwp_text_input_v3.leave (opcode 1)
                     let mut builder = crate::wire::MessageBuilder::new();
-                    builder.write_u32(surface);
+                    builder.write_u32(guest_surface_id);
                     
                     let mut msg = Vec::new();
                     msg.extend_from_slice(&guest_text_input_id.to_ne_bytes());
