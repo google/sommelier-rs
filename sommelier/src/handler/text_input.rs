@@ -323,7 +323,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             }
             
             if state.content_hint != 0 || state.content_purpose != 0 {
-                // set_content_type: opcode 6
+                // set_content_type: opcode 6 (on zwp_text_input_v1)
                 let mut builder = crate::wire::MessageBuilder::new();
                 builder.write_u32(state.content_hint);
                 builder.write_u32(state.content_purpose);
@@ -336,6 +336,40 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 full_msg.extend_from_slice(&builder.payload);
                 ctx.client_to_host_queue.push((full_msg, Vec::new()));
                 
+                // map to zcr_extended_text_input_v1::set_input_type
+                // 0: normal->text(1), 1: alpha->text(1), 2: digits->number(2), 3: number->number(2), 
+                // 4: phone->telephone(3), 5: url->url(4), 6: email->email(5), 7: name->text(1), 8: password->password(6)
+                let input_type = match state.content_purpose {
+                    0 | 1 | 7 => 1, // TEXT
+                    2 | 3 => 2,     // NUMBER
+                    4 => 3,         // TELEPHONE
+                    5 => 4,         // URL
+                    6 => 5,         // EMAIL
+                    8 => 6,         // PASSWORD
+                    // terminal (9)
+                    _ => 1,         // TEXT
+                };
+                
+                let input_mode = 0; // default
+                let input_flags = 0;
+                let learning_mode = 0;
+                let inline_composition_support = 0;
+
+                let mut ext_builder = crate::wire::MessageBuilder::new();
+                ext_builder.write_u32(input_type);
+                ext_builder.write_u32(input_mode);
+                ext_builder.write_u32(input_flags);
+                ext_builder.write_u32(learning_mode);
+                ext_builder.write_u32(inline_composition_support);
+
+                let mut ext_msg = Vec::new();
+                ext_msg.extend_from_slice(&state.host_ext_id.to_ne_bytes());
+                let ext_len = (ext_builder.payload.len() + 8) as u32;
+                let ext_word2 = (ext_len << 16) | 6u32; // REQ_SET_INPUT_TYPE
+                ext_msg.extend_from_slice(&ext_word2.to_ne_bytes());
+                ext_msg.extend_from_slice(&ext_builder.payload);
+                ctx.client_to_host_queue.push((ext_msg, Vec::new()));
+
                 state.content_hint = 0;
                 state.content_purpose = 0;
             }
