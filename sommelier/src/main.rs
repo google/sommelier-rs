@@ -36,6 +36,14 @@ mod protocols {
     ));
     include!(concat!(
         env!("OUT_DIR"),
+        "/text-input-unstable-v1_protocol.rs"
+    ));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/text-input-extension-unstable-v1_protocol.rs"
+    ));
+    include!(concat!(
+        env!("OUT_DIR"),
         "/xdg_decoration_unstable_v1_protocol.rs"
     ));
     include!(concat!(env!("OUT_DIR"), "/fractional_scale_v1_protocol.rs"));

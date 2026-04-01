@@ -36,6 +36,14 @@ fn main() {
             "../third_party/protocols/text-input-unstable-v3.xml",
         ),
         (
+            "text-input-unstable-v1",
+            "../third_party/protocols/text-input-unstable-v1.xml",
+        ),
+        (
+            "text-input-extension-unstable-v1",
+            "../third_party/protocols/text-input-extension-unstable-v1.xml",
+        ),
+        (
             "xdg_decoration_unstable_v1",
             "../third_party/protocols/xdg-decoration-unstable-v1.xml",
         ),
