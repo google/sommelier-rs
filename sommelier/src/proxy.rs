@@ -217,37 +217,47 @@ impl Client {
                 Direction::HostToClient => self.ctx.shadow_table.get_guest_id(sender_id),
             };
 
+            let interface = match direction {
+                Direction::ClientToHost => self.ctx.shadow_table.get_interface(sender_id).cloned(),
+                Direction::HostToClient => self
+                    .ctx
+                    .shadow_table
+                    .get_host_interface(sender_id)
+                    .or_else(|| guest_id.and_then(|gid| self.ctx.shadow_table.get_interface(gid)))
+                    .cloned(),
+            };
+
             let mut consumed_fds = 0;
-            let result = if let Some(gid) = guest_id {
-                if let Some(interface) = self.ctx.shadow_table.get_interface(gid).cloned() {
-                    let mut msg = WireMessage::new(
-                        sender_id,
-                        opcode,
-                        &packet[8..],
-                        &conn.read_fds[fd_offset..],
-                    );
+            let result = if let Some(interface) = interface {
+                let mut msg = WireMessage::new(
+                    sender_id,
+                    opcode,
+                    &packet[8..],
+                    &conn.read_fds[fd_offset..],
+                );
 
-                    log::trace!("[{:?}] {}:{} (len={})", direction, interface, opcode, len);
+                log::trace!("[{:?}] {}:{} (len={})", direction, interface, opcode, len);
 
-                    self.ctx.last_sender_id = sender_id;
+                self.ctx.last_sender_id = sender_id;
 
-                    let res = match direction {
-                        Direction::ClientToHost => Self::dispatch_request(
-                            &mut self.handler,
-                            &mut self.ctx,
-                            &interface,
-                            &mut msg,
-                        ),
-                        Direction::HostToClient => Self::dispatch_event(
-                            &mut self.handler,
-                            &mut self.ctx,
-                            &interface,
-                            &mut msg,
-                        ),
-                    };
-                    consumed_fds = msg.fd_offset;
-                    res
-                } else {
+                let res = match direction {
+                    Direction::ClientToHost => Self::dispatch_request(
+                        &mut self.handler,
+                        &mut self.ctx,
+                        &interface,
+                        &mut msg,
+                    ),
+                    Direction::HostToClient => Self::dispatch_event(
+                        &mut self.handler,
+                        &mut self.ctx,
+                        &interface,
+                        &mut msg,
+                    ),
+                };
+                consumed_fds = msg.fd_offset;
+                res
+            } else {
+                if guest_id.is_some() {
                     log::warn!(
                         "[{:?}] unknown id {} opcode {} (len={})",
                         direction,
@@ -255,16 +265,15 @@ impl Client {
                         opcode,
                         len
                     );
-                    Ok(None)
+                } else {
+                    log::debug!(
+                        "[{:?}] untracked host id {} opcode {} (len={})",
+                        direction,
+                        sender_id,
+                        opcode,
+                        len
+                    );
                 }
-            } else {
-                log::debug!(
-                    "[{:?}] untracked host id {} opcode {} (len={})",
-                    direction,
-                    sender_id,
-                    opcode,
-                    len
-                );
                 Ok(None)
             };
 
@@ -298,7 +307,14 @@ impl Client {
                     log::debug!("  -> dropped (unhandled)");
                 }
                 Err(e) => {
-                    log::error!("Protocol error: {}", e);
+                    let guest_id_for_log = match direction {
+                        Direction::ClientToHost => Some(sender_id),
+                        Direction::HostToClient => self.ctx.shadow_table.get_guest_id(sender_id),
+                    };
+                    let interface = guest_id_for_log
+                        .and_then(|gid| self.ctx.shadow_table.get_interface(gid).cloned())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    log::error!("Protocol error: {} (direction={:?}, id={}, guest_id={:?}, interface={}, opcode={})", e, direction, sender_id, guest_id_for_log, interface, opcode);
                     return false;
                 }
             }

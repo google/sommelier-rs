@@ -27,6 +27,7 @@ pub struct ShadowTable {
     guest_to_host: HashMap<u32, u32>,
     host_to_guest: HashMap<u32, u32>,
     interfaces: HashMap<u32, String>,
+    host_interfaces: HashMap<u32, String>,
     next_host_id: u32,
 }
 
@@ -36,6 +37,7 @@ impl ShadowTable {
             guest_to_host: HashMap::new(),
             host_to_guest: HashMap::new(),
             interfaces: HashMap::new(),
+            host_interfaces: HashMap::new(),
             // Start at 2 to mimic standard Wayland client behavior.
             // ID 1 is reserved for wl_display.
             next_host_id: 2,
@@ -76,13 +78,22 @@ impl ShadowTable {
         self.interfaces.insert(guest_id, interface);
     }
 
+    pub fn track_host_interface(&mut self, host_id: u32, interface: String) {
+        self.host_interfaces.insert(host_id, interface);
+    }
+
     pub fn get_interface(&self, guest_id: u32) -> Option<&String> {
         self.interfaces.get(&guest_id)
+    }
+
+    pub fn get_host_interface(&self, host_id: u32) -> Option<&String> {
+        self.host_interfaces.get(&host_id)
     }
 
     pub fn remove_id(&mut self, guest_id: u32) {
         if let Some(host_id) = self.guest_to_host.remove(&guest_id) {
             self.host_to_guest.remove(&host_id);
+            self.host_interfaces.remove(&host_id);
         }
         self.interfaces.remove(&guest_id);
     }
