@@ -186,11 +186,26 @@ pub struct PendingParam {
     pub modifier_lo: u32,
 }
 
+pub struct TextInputState {
+    pub host_v1_id: u32,
+    pub host_ext_id: u32,
+    pub guest_seat: u32,
+    pub active_surface: Option<u32>,
+    pub enabled: bool,
+    pub enabled_changed: bool,
+    pub surrounding_text: Option<(String, i32, i32)>,
+    pub content_hint: u32,
+    pub content_purpose: u32,
+    pub cursor_rect: Option<(i32, i32, i32, i32)>,
+    pub text_change_cause: u32,
+}
+
 pub struct Context {
     pub shadow_table: ShadowTable,
     pub pools: HashMap<u32, Arc<PoolState>>,
     pub buffers: HashMap<u32, BufferState>,
     pub surfaces: HashMap<u32, SurfaceState>,
+    pub text_inputs: HashMap<u32, TextInputState>,
     pub last_sender_id: u32,
     pub client_to_host_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
     pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
@@ -224,6 +239,7 @@ impl Context {
             pools: HashMap::new(),
             buffers: HashMap::new(),
             surfaces: HashMap::new(),
+            text_inputs: HashMap::new(),
             last_sender_id: 0,
             client_to_host_queue: Vec::new(),
             host_to_client_queue: Vec::new(),
