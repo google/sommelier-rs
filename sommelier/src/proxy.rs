@@ -41,6 +41,12 @@ struct SommelierHandler {
     shm: crate::handler::shm::ShmHandler,
     linux_dmabuf: crate::handler::linux_dmabuf::LinuxDmabufHandler,
     data_device: crate::handler::data_device::DataDeviceHandler,
+    text_input_manager_v1: crate::handler::text_input::TextInputManagerV1Handler,
+    text_input_v1: crate::handler::text_input::TextInputV1Handler,
+    text_input_extension_v1: crate::handler::text_input::TextInputExtensionV1Handler,
+    extended_text_input_v1: crate::handler::text_input::ExtendedTextInputV1Handler,
+    text_input_manager_v3: crate::handler::text_input::TextInputManagerV3Handler,
+    text_input_v3: crate::handler::text_input::TextInputV3Handler,
 }
 
 impl SommelierHandler {
@@ -53,6 +59,12 @@ impl SommelierHandler {
             shm: crate::handler::shm::ShmHandler,
             linux_dmabuf: crate::handler::linux_dmabuf::LinuxDmabufHandler,
             data_device: crate::handler::data_device::DataDeviceHandler,
+            text_input_manager_v1: crate::handler::text_input::TextInputManagerV1Handler,
+            text_input_v1: crate::handler::text_input::TextInputV1Handler,
+            text_input_extension_v1: crate::handler::text_input::TextInputExtensionV1Handler,
+            extended_text_input_v1: crate::handler::text_input::ExtendedTextInputV1Handler,
+            text_input_manager_v3: crate::handler::text_input::TextInputManagerV3Handler,
+            text_input_v3: crate::handler::text_input::TextInputV3Handler,
         }
     }
 }
@@ -125,6 +137,10 @@ impl Client {
             protocols::viewporter::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v3::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v3::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::text_input_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::text_input_unstable_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::text_input_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::text_input_extension_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
@@ -150,6 +166,10 @@ impl Client {
             protocols::viewporter::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v3::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v3::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::text_input_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::text_input_unstable_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::text_input_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::text_input_extension_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
@@ -353,8 +373,25 @@ protocols::linux_dmabuf_v1::impl_sommelier_delegates!(SommelierHandler, {
 });
 impl protocols::linux_dmabuf_v1::ProtocolHandler for SommelierHandler {}
 
+// Text Input unstable v1 Protocol
+protocols::text_input_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {
+    zwp_text_input_manager_v1: text_input_manager_v1,
+    zwp_text_input_v1: text_input_v1
+});
+impl protocols::text_input_unstable_v1::ProtocolHandler for SommelierHandler {}
+
+// Text Input Extension unstable v1 Protocol
+protocols::text_input_extension_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {
+    zcr_text_input_extension_v1: text_input_extension_v1,
+    zcr_extended_text_input_v1: extended_text_input_v1
+});
+impl protocols::text_input_extension_unstable_v1::ProtocolHandler for SommelierHandler {}
+
 // Text Input unstable v3 Protocol
-protocols::text_input_unstable_v3::impl_sommelier_delegates!(SommelierHandler, {});
+protocols::text_input_unstable_v3::impl_sommelier_delegates!(SommelierHandler, {
+    zwp_text_input_manager_v3: text_input_manager_v3,
+    zwp_text_input_v3: text_input_v3
+});
 impl protocols::text_input_unstable_v3::ProtocolHandler for SommelierHandler {}
 
 // Viewporter Protocol
