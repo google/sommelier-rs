@@ -48,7 +48,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         let mut msg = Vec::new();
                         msg.extend_from_slice(&guest_text_input_id.to_ne_bytes());
                         let len = (builder.payload.len() + 8) as u32;
-                        let word2 = (len << 16) | 0u32;
+                        let word2 = len << 16;
                         msg.extend_from_slice(&word2.to_ne_bytes());
                         msg.extend_from_slice(&builder.payload);
                         ctx.host_to_client_queue.push((msg, Vec::new()));

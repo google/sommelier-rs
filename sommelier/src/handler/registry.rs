@@ -101,7 +101,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             let client_version = 1;
             let mut global_builder = MessageBuilder::new();
             global_builder.write_u32(name);
-            global_builder.write_string(&"zwp_text_input_manager_v3".to_string());
+            global_builder.write_string("zwp_text_input_manager_v3");
             global_builder.write_u32(client_version);
 
             // Translate host registry ID to guest registry ID

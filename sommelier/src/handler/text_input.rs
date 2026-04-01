@@ -64,7 +64,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
             // v3 preedit_string (opcode 2) - explicitly clear preedit before commit
             let mut builder = crate::wire::MessageBuilder::new();
-            builder.write_string(&String::new());
+            builder.write_string("");
             builder.write_i32(0); // cursor_begin
             builder.write_i32(0); // cursor_end
             
@@ -283,7 +283,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
             let mut full_msg = Vec::new();
             full_msg.extend_from_slice(&host_manager_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 0u32; // opcode 0: create_text_input
+            let word2 = len << 16; // opcode 0: create_text_input
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
             
@@ -298,7 +298,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
             let mut full_msg = Vec::new();
             full_msg.extend_from_slice(&host_ext_manager_id.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 0u32; // opcode 0: get_extended_text_input
+            let word2 = len << 16; // opcode 0: get_extended_text_input
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
             
@@ -417,7 +417,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                     let mut full_msg = Vec::new();
                     full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
                     let len = (builder.payload.len() + 8) as u32;
-                    let word2 = (len << 16) | 0u32;
+                    let word2 = len << 16;
                     full_msg.extend_from_slice(&word2.to_ne_bytes());
                     full_msg.extend_from_slice(&builder.payload);
                     ctx.client_to_host_queue.push((full_msg, Vec::new()));
