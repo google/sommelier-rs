@@ -62,6 +62,20 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     ) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            // v3 preedit_string (opcode 2) - explicitly clear preedit before commit
+            let mut builder = crate::wire::MessageBuilder::new();
+            builder.write_string(&String::new());
+            builder.write_i32(0); // cursor_begin
+            builder.write_i32(0); // cursor_end
+            
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&guest_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 2u32;
+            msg.extend_from_slice(&word2.to_ne_bytes());
+            msg.extend_from_slice(&builder.payload);
+            ctx.host_to_client_queue.push((msg, Vec::new()));
+
             // v3 commit_string (opcode 3)
             let mut builder = crate::wire::MessageBuilder::new();
             builder.write_string(text);
