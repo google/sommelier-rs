@@ -181,13 +181,15 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
         ctx.shadow_table.map_id(id, host_v1_id);
         ctx.shadow_table.track_interface(id, "zwp_text_input_v3".to_string());
 
+        let active_surface = ctx.active_surface_for_seat.get(&seat).copied();
+
         ctx.text_inputs.insert(
             id,
             crate::state::TextInputState {
                 host_v1_id,
                 host_ext_id,
                 guest_seat: seat,
-                active_surface: None,
+                active_surface,
                 enabled: false,
                 enabled_changed: false,
                 surrounding_text: None,
