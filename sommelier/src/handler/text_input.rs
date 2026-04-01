@@ -27,7 +27,115 @@ pub struct TextInputManagerV1Handler;
 impl zwp_text_input_manager_v1::ZwpTextInputManagerV1Handler for TextInputManagerV1Handler {}
 
 pub struct TextInputV1Handler;
-impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {}
+impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
+    fn on_preedit_string(
+        &mut self,
+        ctx: &mut Context,
+        _serial: u32,
+        text: &String,
+        _commit: &String,
+    ) -> Action {
+        let host_id = ctx.last_sender_id;
+        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            // v3 preedit_string (opcode 2)
+            let mut builder = crate::wire::MessageBuilder::new();
+            builder.write_string(text);
+            builder.write_i32(0); // cursor_begin
+            builder.write_i32(0); // cursor_end
+            
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&guest_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 2u32;
+            msg.extend_from_slice(&word2.to_ne_bytes());
+            msg.extend_from_slice(&builder.payload);
+            ctx.host_to_client_queue.push((msg, Vec::new()));
+        }
+        Action::Drop
+    }
+
+    fn on_commit_string(
+        &mut self,
+        ctx: &mut Context,
+        _serial: u32,
+        text: &String,
+    ) -> Action {
+        let host_id = ctx.last_sender_id;
+        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            // v3 commit_string (opcode 3)
+            let mut builder = crate::wire::MessageBuilder::new();
+            builder.write_string(text);
+            
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&guest_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 3u32;
+            msg.extend_from_slice(&word2.to_ne_bytes());
+            msg.extend_from_slice(&builder.payload);
+            ctx.host_to_client_queue.push((msg, Vec::new()));
+
+            // v3 done (opcode 5)
+            // serial matches state but for simplicity we can send 0 or _serial
+            let mut builder = crate::wire::MessageBuilder::new();
+            builder.write_u32(0); // serial
+            
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&guest_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 5u32;
+            msg.extend_from_slice(&word2.to_ne_bytes());
+            msg.extend_from_slice(&builder.payload);
+            ctx.host_to_client_queue.push((msg, Vec::new()));
+        }
+        Action::Drop
+    }
+
+    fn on_keysym(
+        &mut self,
+        ctx: &mut Context,
+        _serial: u32,
+        _time: u32,
+        sym: u32,
+        state: u32,
+        _modifiers: u32,
+    ) -> Action {
+        let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
+        if let Some(keymap) = xkbcommon::xkb::Keymap::new_from_names(
+            &context, "", "", "", "", None, xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+        ) {
+            let mut found_keycode = None;
+            for keycode_raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
+                let keycode = keycode_raw.into();
+                let syms = keymap.key_get_syms_by_level(keycode, 0, 0);
+                if syms.iter().any(|s| s.raw() == sym) {
+                    found_keycode = Some(keycode_raw - 8);
+                    break;
+                }
+            }
+
+            if let Some(keycode) = found_keycode {
+                let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
+                if let Some(&keyboard_id) = keyboards.first() {
+                    // Send wl_keyboard::key (opcode 3)
+                    let mut builder = crate::wire::MessageBuilder::new();
+                    builder.write_u32(0); // serial
+                    builder.write_u32(0); // time
+                    builder.write_u32(keycode); // key
+                    builder.write_u32(state); // state (0: released, 1: pressed)
+
+                    let mut msg = Vec::new();
+                    msg.extend_from_slice(&keyboard_id.to_ne_bytes());
+                    let len = (builder.payload.len() + 8) as u32;
+                    let word2 = (len << 16) | 3u32;
+                    msg.extend_from_slice(&word2.to_ne_bytes());
+                    msg.extend_from_slice(&builder.payload);
+                    ctx.host_to_client_queue.push((msg, Vec::new()));
+                }
+            }
+        }
+        Action::Drop
+    }
+}
 
 pub struct TextInputExtensionV1Handler;
 impl zcr_text_input_extension_v1::ZcrTextInputExtensionV1Handler for TextInputExtensionV1Handler {}
@@ -36,7 +144,232 @@ pub struct ExtendedTextInputV1Handler;
 impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextInputV1Handler {}
 
 pub struct TextInputManagerV3Handler;
-impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManagerV3Handler {}
+impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManagerV3Handler {
+    fn on_get_text_input(&mut self, ctx: &mut Context, id: u32, seat: u32) -> Action {
+        let host_v1_id = ctx.shadow_table.allocate_host_id();
+        let host_ext_id = ctx.shadow_table.allocate_host_id();
+
+        if let Some(host_manager_id) = ctx.host_text_input_manager_v1_id {
+            let mut builder = crate::wire::MessageBuilder::new();
+            builder.write_u32(host_v1_id);
+            
+            let mut full_msg = Vec::new();
+            full_msg.extend_from_slice(&host_manager_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 0u32; // opcode 0: create_text_input
+            full_msg.extend_from_slice(&word2.to_ne_bytes());
+            full_msg.extend_from_slice(&builder.payload);
+            
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+        }
+
+        if let Some(host_ext_manager_id) = ctx.host_text_input_extension_v1_id {
+            let mut builder = crate::wire::MessageBuilder::new();
+            builder.write_u32(host_ext_id);
+            builder.write_u32(host_v1_id);
+            
+            let mut full_msg = Vec::new();
+            full_msg.extend_from_slice(&host_ext_manager_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 0u32; // opcode 0: get_extended_text_input
+            full_msg.extend_from_slice(&word2.to_ne_bytes());
+            full_msg.extend_from_slice(&builder.payload);
+            
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+        }
+
+        ctx.shadow_table.map_id(id, host_v1_id);
+        ctx.shadow_table.track_interface(id, "zwp_text_input_v3".to_string());
+
+        ctx.text_inputs.insert(
+            id,
+            crate::state::TextInputState {
+                host_v1_id,
+                host_ext_id,
+                guest_seat: seat,
+                active_surface: None,
+                enabled: false,
+                enabled_changed: false,
+                surrounding_text: None,
+                content_hint: 0,
+                content_purpose: 0,
+                cursor_rect: None,
+                text_change_cause: 0,
+            },
+        );
+
+        Action::Drop
+    }
+}
 
 pub struct TextInputV3Handler;
-impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {}
+impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
+    fn on_enable(&mut self, ctx: &mut Context) -> Action {
+        let guest_id = ctx.last_sender_id;
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.enabled = true;
+            state.enabled_changed = true;
+        }
+        Action::Drop
+    }
+
+    fn on_disable(&mut self, ctx: &mut Context) -> Action {
+        let guest_id = ctx.last_sender_id;
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.enabled = false;
+            state.enabled_changed = true;
+        }
+        Action::Drop
+    }
+
+    fn on_set_surrounding_text(
+        &mut self,
+        ctx: &mut Context,
+        text: &String,
+        cursor: i32,
+        anchor: i32,
+    ) -> Action {
+        let guest_id = ctx.last_sender_id;
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.surrounding_text = Some((text.clone(), cursor, anchor));
+        }
+        Action::Drop
+    }
+
+    fn on_set_text_change_cause(&mut self, ctx: &mut Context, cause: u32) -> Action {
+        let guest_id = ctx.last_sender_id;
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.text_change_cause = cause;
+        }
+        Action::Drop
+    }
+
+    fn on_set_content_type(&mut self, ctx: &mut Context, hint: u32, purpose: u32) -> Action {
+        let guest_id = ctx.last_sender_id;
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.content_hint = hint;
+            state.content_purpose = purpose;
+        }
+        Action::Drop
+    }
+
+    fn on_set_cursor_rectangle(
+        &mut self,
+        ctx: &mut Context,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Action {
+        let guest_id = ctx.last_sender_id;
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.cursor_rect = Some((x, y, width, height));
+        }
+        Action::Drop
+    }
+
+    fn on_commit(&mut self, ctx: &mut Context) -> Action {
+        let guest_id = ctx.last_sender_id;
+        
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            let host_v1_id = state.host_v1_id;
+            let host_seat = ctx.shadow_table.get_host_id(state.guest_seat).unwrap_or(0);
+            let host_surface = state.active_surface.and_then(|s| ctx.shadow_table.get_host_id(s)).unwrap_or(0);
+            
+            if state.enabled_changed {
+                if state.enabled {
+                    // activate: opcode 0
+                    let mut builder = crate::wire::MessageBuilder::new();
+                    builder.write_u32(host_seat);
+                    builder.write_u32(host_surface);
+                    
+                    let mut full_msg = Vec::new();
+                    full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+                    let len = (builder.payload.len() + 8) as u32;
+                    let word2 = (len << 16) | 0u32;
+                    full_msg.extend_from_slice(&word2.to_ne_bytes());
+                    full_msg.extend_from_slice(&builder.payload);
+                    ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                } else {
+                    // deactivate: opcode 1
+                    let mut builder = crate::wire::MessageBuilder::new();
+                    builder.write_u32(host_seat);
+                    
+                    let mut full_msg = Vec::new();
+                    full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+                    let len = (builder.payload.len() + 8) as u32;
+                    let word2 = (len << 16) | 1u32;
+                    full_msg.extend_from_slice(&word2.to_ne_bytes());
+                    full_msg.extend_from_slice(&builder.payload);
+                    ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                }
+                state.enabled_changed = false;
+            }
+            
+            if let Some((text, cursor, anchor)) = state.surrounding_text.take() {
+                // set_surrounding_text: opcode 5
+                let mut builder = crate::wire::MessageBuilder::new();
+                builder.write_string(&text);
+                builder.write_u32(cursor as u32);
+                builder.write_u32(anchor as u32);
+                
+                let mut full_msg = Vec::new();
+                full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+                let len = (builder.payload.len() + 8) as u32;
+                let word2 = (len << 16) | 5u32;
+                full_msg.extend_from_slice(&word2.to_ne_bytes());
+                full_msg.extend_from_slice(&builder.payload);
+                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            }
+            
+            if state.content_hint != 0 || state.content_purpose != 0 {
+                // set_content_type: opcode 6
+                let mut builder = crate::wire::MessageBuilder::new();
+                builder.write_u32(state.content_hint);
+                builder.write_u32(state.content_purpose);
+                
+                let mut full_msg = Vec::new();
+                full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+                let len = (builder.payload.len() + 8) as u32;
+                let word2 = (len << 16) | 6u32;
+                full_msg.extend_from_slice(&word2.to_ne_bytes());
+                full_msg.extend_from_slice(&builder.payload);
+                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                
+                state.content_hint = 0;
+                state.content_purpose = 0;
+            }
+            
+            if let Some((x, y, w, h)) = state.cursor_rect.take() {
+                // set_cursor_rectangle: opcode 7
+                let mut builder = crate::wire::MessageBuilder::new();
+                builder.write_i32(x);
+                builder.write_i32(y);
+                builder.write_i32(w);
+                builder.write_i32(h);
+                
+                let mut full_msg = Vec::new();
+                full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+                let len = (builder.payload.len() + 8) as u32;
+                let word2 = (len << 16) | 7u32;
+                full_msg.extend_from_slice(&word2.to_ne_bytes());
+                full_msg.extend_from_slice(&builder.payload);
+                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            }
+            
+            // commit_state: opcode 9
+            let mut builder = crate::wire::MessageBuilder::new();
+            builder.write_u32(0); // serial
+            
+            let mut full_msg = Vec::new();
+            full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 9u32;
+            full_msg.extend_from_slice(&word2.to_ne_bytes());
+            full_msg.extend_from_slice(&builder.payload);
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+        }
+        
+        Action::Drop
+    }
+}
