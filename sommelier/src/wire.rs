@@ -69,6 +69,7 @@ impl<'a> WireMessage<'a> {
 
     pub fn read_u32(&mut self) -> Result<u32, ProtocolError> {
         if self.offset + 4 > self.payload.len() {
+            log::error!("InsufficientData in read_u32: offset {} > payload len {}", self.offset + 4, self.payload.len());
             return Err(ProtocolError::InsufficientData);
         }
         let bytes = &self.payload[self.offset..self.offset + 4];
@@ -95,6 +96,7 @@ impl<'a> WireMessage<'a> {
         let padded_len = (len + 3) & !3;
 
         if self.offset + padded_len > self.payload.len() {
+            log::error!("InsufficientData in read_string: offset {} + padded_len {} > payload len {}", self.offset, padded_len, self.payload.len());
             return Err(ProtocolError::InsufficientData);
         }
 
@@ -122,6 +124,7 @@ impl<'a> WireMessage<'a> {
         let padded_len = (len + 3) & !3;
 
         if self.offset + padded_len > self.payload.len() {
+            log::error!("InsufficientData in read_array: offset {} + padded_len {} > payload len {}", self.offset, padded_len, self.payload.len());
             return Err(ProtocolError::InsufficientData);
         }
 

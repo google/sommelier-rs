@@ -90,6 +90,78 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
 
             // Drop the original global event so we don't send the v4 advertisement
             return Action::Drop;
+        } else if interface == "zwp_text_input_manager_v1" {
+            let host_id = ctx.shadow_table.allocate_host_id();
+            ctx.host_text_input_manager_v1_id = Some(host_id);
+            let placeholder_guest_id = 0xFC00_0000 | host_id;
+            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
+            ctx.shadow_table
+                .track_interface(placeholder_guest_id, "zwp_text_input_manager_v1".to_string());
+
+            let client_version = 1;
+            let mut global_builder = MessageBuilder::new();
+            global_builder.write_u32(name);
+            global_builder.write_string("zwp_text_input_manager_v3");
+            global_builder.write_u32(client_version);
+
+            // Translate host registry ID to guest registry ID
+            let registry_guest_id = ctx
+                .shadow_table
+                .get_guest_id(ctx.last_sender_id)
+                .unwrap_or(ctx.last_sender_id);
+
+            let mut global_msg = Vec::new();
+            global_msg.extend_from_slice(&registry_guest_id.to_ne_bytes());
+            let len = (global_builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | (wl_registry::EVT_GLOBAL as u32);
+            global_msg.extend_from_slice(&word2.to_ne_bytes());
+            global_msg.extend_from_slice(&global_builder.payload);
+            ctx.host_to_client_queue.push((global_msg, Vec::new()));
+
+            // 2. Bind internally
+            let registry_host_id = ctx.last_sender_id;
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(name);
+            builder.write_string(interface);
+            builder.write_u32(version);
+            builder.write_u32(host_id); // new_id
+
+            let mut full_msg = Vec::new();
+            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
+            full_msg.extend_from_slice(&word2.to_ne_bytes());
+            full_msg.extend_from_slice(&builder.payload);
+
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+
+            return Action::Drop;
+        } else if interface == "zcr_text_input_extension_v1" {
+            let host_id = ctx.shadow_table.allocate_host_id();
+            ctx.host_text_input_extension_v1_id = Some(host_id);
+            let placeholder_guest_id = 0xFB00_0000 | host_id;
+            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
+            ctx.shadow_table
+                .track_interface(placeholder_guest_id, "zcr_text_input_extension_v1".to_string());
+
+            // 2. Bind internally
+            let registry_host_id = ctx.last_sender_id;
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(name);
+            builder.write_string(interface);
+            builder.write_u32(version);
+            builder.write_u32(host_id); // new_id
+
+            let mut full_msg = Vec::new();
+            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
+            full_msg.extend_from_slice(&word2.to_ne_bytes());
+            full_msg.extend_from_slice(&builder.payload);
+
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+
+            return Action::Drop;
         } else if interface == "wl_shm" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_shm_id = Some(host_id);
@@ -157,6 +229,16 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
                 ctx.host_to_client_queue.push((full_msg, Vec::new()));
             }
 
+            return Action::Drop;
+        } else if interface == "zwp_text_input_manager_v3" {
+            // Map the client's v3 ID to the host's v1 ID we already bound.
+            if let Some(host_id) = ctx.host_text_input_manager_v1_id {
+                ctx.shadow_table.map_id(*guest_new_id, host_id);
+                ctx.shadow_table
+                    .track_interface(*guest_new_id, "zwp_text_input_manager_v3".to_string());
+            } else {
+                error!("zwp_text_input_manager_v3 bound but host v1 manager not found");
+            }
             return Action::Drop;
         }
 

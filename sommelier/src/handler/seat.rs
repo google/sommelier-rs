@@ -14,13 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-pub mod callback;
-pub mod compositor;
-pub mod data_device;
-pub mod display;
-pub mod keyboard;
-pub mod linux_dmabuf;
-pub mod registry;
-pub mod seat;
-pub mod shm;
-pub mod text_input;
+use crate::protocols::wayland::wl_seat;
+use crate::state::Context;
+use crate::wire::Action;
+
+pub struct SeatHandler;
+
+impl wl_seat::WlSeatHandler for SeatHandler {
+    fn on_get_keyboard(&mut self, ctx: &mut Context, id: u32) -> Action {
+        let guest_seat_id = ctx.last_sender_id;
+        ctx.keyboard_to_seat.insert(id, guest_seat_id);
+        ctx.shadow_table.track_interface(id, "wl_keyboard".to_string());
+        Action::Forward
+    }
+}

@@ -27,6 +27,7 @@ pub struct ShadowTable {
     guest_to_host: HashMap<u32, u32>,
     host_to_guest: HashMap<u32, u32>,
     interfaces: HashMap<u32, String>,
+    host_interfaces: HashMap<u32, String>,
     next_host_id: u32,
 }
 
@@ -36,6 +37,7 @@ impl ShadowTable {
             guest_to_host: HashMap::new(),
             host_to_guest: HashMap::new(),
             interfaces: HashMap::new(),
+            host_interfaces: HashMap::new(),
             // Start at 2 to mimic standard Wayland client behavior.
             // ID 1 is reserved for wl_display.
             next_host_id: 2,
@@ -76,13 +78,22 @@ impl ShadowTable {
         self.interfaces.insert(guest_id, interface);
     }
 
+    pub fn track_host_interface(&mut self, host_id: u32, interface: String) {
+        self.host_interfaces.insert(host_id, interface);
+    }
+
     pub fn get_interface(&self, guest_id: u32) -> Option<&String> {
         self.interfaces.get(&guest_id)
+    }
+
+    pub fn get_host_interface(&self, host_id: u32) -> Option<&String> {
+        self.host_interfaces.get(&host_id)
     }
 
     pub fn remove_id(&mut self, guest_id: u32) {
         if let Some(host_id) = self.guest_to_host.remove(&guest_id) {
             self.host_to_guest.remove(&host_id);
+            self.host_interfaces.remove(&host_id);
         }
         self.interfaces.remove(&guest_id);
     }
@@ -186,11 +197,28 @@ pub struct PendingParam {
     pub modifier_lo: u32,
 }
 
+pub struct TextInputState {
+    pub host_v1_id: u32,
+    pub host_ext_id: u32,
+    pub guest_seat: u32,
+    pub active_surface: Option<u32>,
+    pub enabled: bool,
+    pub enabled_changed: bool,
+    pub surrounding_text: Option<(String, i32, i32)>,
+    pub content_hint: u32,
+    pub content_purpose: u32,
+    pub cursor_rect: Option<(i32, i32, i32, i32)>,
+    pub text_change_cause: u32,
+}
+
 pub struct Context {
     pub shadow_table: ShadowTable,
     pub pools: HashMap<u32, Arc<PoolState>>,
     pub buffers: HashMap<u32, BufferState>,
     pub surfaces: HashMap<u32, SurfaceState>,
+    pub text_inputs: HashMap<u32, TextInputState>,
+    pub keyboard_to_seat: HashMap<u32, u32>,
+    pub active_surface_for_seat: HashMap<u32, u32>,
     pub last_sender_id: u32,
     pub client_to_host_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
     pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
@@ -198,6 +226,8 @@ pub struct Context {
     pub virtwayland_channel: Option<Arc<VirtWaylandChannel>>,
     pub host_dmabuf_id: Option<u32>,
     pub host_shm_id: Option<u32>,
+    pub host_text_input_manager_v1_id: Option<u32>,
+    pub host_text_input_extension_v1_id: Option<u32>,
     pub supported_formats: HashSet<u32>,
     pub host_globals: HashMap<String, u32>,
     pub pending_params: HashMap<u32, Vec<PendingParam>>,
@@ -222,6 +252,9 @@ impl Context {
             pools: HashMap::new(),
             buffers: HashMap::new(),
             surfaces: HashMap::new(),
+            text_inputs: HashMap::new(),
+            keyboard_to_seat: HashMap::new(),
+            active_surface_for_seat: HashMap::new(),
             last_sender_id: 0,
             client_to_host_queue: Vec::new(),
             host_to_client_queue: Vec::new(),
@@ -229,6 +262,8 @@ impl Context {
             virtwayland_channel: None,
             host_dmabuf_id: None,
             host_shm_id: None,
+            host_text_input_manager_v1_id: None,
+            host_text_input_extension_v1_id: None,
             supported_formats: HashSet::new(),
             host_globals: HashMap::new(),
             pending_params: HashMap::new(),
