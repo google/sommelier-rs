@@ -95,8 +95,10 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             ctx.host_text_input_manager_v1_id = Some(host_id);
             let placeholder_guest_id = 0xFC00_0000 | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
-            ctx.shadow_table
-                .track_interface(placeholder_guest_id, "zwp_text_input_manager_v1".to_string());
+            ctx.shadow_table.track_interface(
+                placeholder_guest_id,
+                "zwp_text_input_manager_v1".to_string(),
+            );
 
             let client_version = 1;
             let mut global_builder = MessageBuilder::new();
@@ -141,8 +143,10 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             ctx.host_text_input_extension_v1_id = Some(host_id);
             let placeholder_guest_id = 0xFB00_0000 | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
-            ctx.shadow_table
-                .track_interface(placeholder_guest_id, "zcr_text_input_extension_v1".to_string());
+            ctx.shadow_table.track_interface(
+                placeholder_guest_id,
+                "zcr_text_input_extension_v1".to_string(),
+            );
 
             // 2. Bind internally
             let registry_host_id = ctx.last_sender_id;
@@ -189,15 +193,16 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
         }
 
-        if !WL_ALLOWED.contains(&interface.as_str())
-            && !XDG_ALLOWED.contains(&interface.as_str())
-            && !DMABUF_ALLOWED.contains(&interface.as_str())
-            && !VIEWPORTER_ALLOWED.contains(&interface.as_str())
-            && !TEXT_INPUT_ALLOWED.contains(&interface.as_str())
-            && (!XDG_DECORATION_ALLOWED.contains(&interface.as_str()) || ctx.disable_xdg_decoration)
-            && !FRACTIONAL_SCALE_ALLOWED.contains(&interface.as_str())
-            && interface != "wl_data_device_manager"
-        {
+        let is_allowed = WL_ALLOWED.contains(&interface.as_str())
+            || XDG_ALLOWED.contains(&interface.as_str())
+            || DMABUF_ALLOWED.contains(&interface.as_str())
+            || VIEWPORTER_ALLOWED.contains(&interface.as_str())
+            || TEXT_INPUT_ALLOWED.contains(&interface.as_str())
+            || (XDG_DECORATION_ALLOWED.contains(&interface.as_str()) && ctx.xdg_decoration)
+            || FRACTIONAL_SCALE_ALLOWED.contains(&interface.as_str())
+            || interface == "wl_data_device_manager";
+
+        if !is_allowed {
             return Action::Drop;
         }
         Action::Forward
