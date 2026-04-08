@@ -233,11 +233,11 @@ pub struct Context {
     pub pending_params: HashMap<u32, Vec<PendingParam>>,
     pub feedback_index_maps: HashMap<u32, HashMap<u16, u16>>,
     pub gpu_accel: bool,
-    pub disable_xdg_decoration: bool,
+    pub xdg_decoration: bool,
 }
 
 impl Context {
-    pub fn new(gpu_accel: bool, disable_xdg_decoration: bool) -> Self {
+    pub fn new(gpu_accel: bool, xdg_decoration: bool) -> Self {
         // Initialize allocator
         let allocator = match Allocator::new() {
             Ok(alloc) => Some(alloc),
@@ -269,7 +269,7 @@ impl Context {
             pending_params: HashMap::new(),
             feedback_index_maps: HashMap::new(),
             gpu_accel,
-            disable_xdg_decoration,
+            xdg_decoration,
         }
     }
 }

@@ -85,12 +85,12 @@ impl Client {
         client_conn: WaylandConnection,
         host_conn: WaylandConnection,
         gpu_accel: bool,
-        disable_xdg_decoration: bool,
+        xdg_decoration: bool,
     ) -> Self {
         Self {
             client_conn,
             host_conn,
-            ctx: Context::new(gpu_accel, disable_xdg_decoration),
+            ctx: Context::new(gpu_accel, xdg_decoration),
             handler: SommelierHandler::new(),
         }
     }
@@ -143,8 +143,12 @@ impl Client {
             protocols::text_input_unstable_v3::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v1::dispatch_request(interface, msg, handler, ctx)
-        } else if protocols::text_input_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
-            protocols::text_input_extension_unstable_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::text_input_extension_unstable_v1::ALLOWED_INTERFACES
+            .contains(&interface)
+        {
+            protocols::text_input_extension_unstable_v1::dispatch_request(
+                interface, msg, handler, ctx,
+            )
         } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
@@ -172,8 +176,12 @@ impl Client {
             protocols::text_input_unstable_v3::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v1::dispatch_event(interface, msg, handler, ctx)
-        } else if protocols::text_input_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
-            protocols::text_input_extension_unstable_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::text_input_extension_unstable_v1::ALLOWED_INTERFACES
+            .contains(&interface)
+        {
+            protocols::text_input_extension_unstable_v1::dispatch_event(
+                interface, msg, handler, ctx,
+            )
         } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
@@ -229,12 +237,8 @@ impl Client {
 
             let mut consumed_fds = 0;
             let result = if let Some(interface) = interface {
-                let mut msg = WireMessage::new(
-                    sender_id,
-                    opcode,
-                    &packet[8..],
-                    &conn.read_fds[fd_offset..],
-                );
+                let mut msg =
+                    WireMessage::new(sender_id, opcode, &packet[8..], &conn.read_fds[fd_offset..]);
 
                 log::trace!("[{:?}] {}:{} (len={})", direction, interface, opcode, len);
 
@@ -247,12 +251,9 @@ impl Client {
                         &interface,
                         &mut msg,
                     ),
-                    Direction::HostToClient => Self::dispatch_event(
-                        &mut self.handler,
-                        &mut self.ctx,
-                        &interface,
-                        &mut msg,
-                    ),
+                    Direction::HostToClient => {
+                        Self::dispatch_event(&mut self.handler, &mut self.ctx, &interface, &mut msg)
+                    }
                 };
                 consumed_fds = msg.fd_offset;
                 res
@@ -432,7 +433,7 @@ pub async fn run(
     display: &str,
     local_compositor: Option<String>,
     gpu_accel: bool,
-    disable_xdg_decoration: bool,
+    xdg_decoration: bool,
     virtio_wayland: Option<String>,
 ) {
     if let Some(path) = &virtio_wayland {
@@ -528,8 +529,7 @@ pub async fn run(
                 };
 
                 if let Some(host_conn) = host_conn {
-                    let mut client =
-                        Client::new(client_conn, host_conn, gpu_accel, disable_xdg_decoration);
+                    let mut client = Client::new(client_conn, host_conn, gpu_accel, xdg_decoration);
                     if let Some(channel) = virtwayland_channel_ref {
                         client.ctx.virtwayland_channel = Some(channel);
                     }

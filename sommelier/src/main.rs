@@ -60,9 +60,9 @@ struct Args {
     #[arg(long, hide = true, default_value_t = false)]
     gpu_accel: bool,
 
-    /// Disable XDG Decoration support
+    /// Enable XDG Decoration support
     #[arg(long)]
-    no_xdg_decoration: bool,
+    xdg_decoration: bool,
 
     /// Use virtio-wayland channel at PATH (defaults to /dev/wl0 if --local-compositor is not specified)
     #[arg(long)]
@@ -82,7 +82,7 @@ async fn main() {
 
     let local_compositor = args.local_compositor;
     let gpu_accel = args.gpu_accel;
-    let disable_xdg_decoration = args.no_xdg_decoration;
+    let xdg_decoration = args.xdg_decoration;
     let mut virtio_wl = args.virtio_wl;
 
     if local_compositor.is_none() && virtio_wl.is_none() {
@@ -105,7 +105,7 @@ async fn main() {
         &socket_path,
         local_compositor,
         gpu_accel,
-        disable_xdg_decoration,
+        xdg_decoration,
         virtio_wl,
     )
     .await;

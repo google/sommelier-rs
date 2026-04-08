@@ -24,7 +24,8 @@ impl wl_seat::WlSeatHandler for SeatHandler {
     fn on_get_keyboard(&mut self, ctx: &mut Context, id: u32) -> Action {
         let guest_seat_id = ctx.last_sender_id;
         ctx.keyboard_to_seat.insert(id, guest_seat_id);
-        ctx.shadow_table.track_interface(id, "wl_keyboard".to_string());
+        ctx.shadow_table
+            .track_interface(id, "wl_keyboard".to_string());
         Action::Forward
     }
 }
