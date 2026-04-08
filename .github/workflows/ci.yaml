@@ -1,0 +1,38 @@
+name: Virtwl CI
+
+on:
+  push:
+    branches: ["virtwl"]
+  pull_request:
+    branches: ["virtwl"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Update toolchain
+        run: rustup target add aarch64-unknown-linux-gnu
+
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get -y install libxkbcommon0 libgbm1 libdrm2 libexpat1 gcc-aarch64-linux-gnu
+
+      - name: Build
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --verbose --target ${{ matrix.target }}
+
+      - name: Run tests (x86_64 only)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --verbose --target ${{ matrix.target }}
