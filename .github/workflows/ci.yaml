@@ -35,7 +35,8 @@ jobs:
           Architectures: arm64
           URIs: http://ports.ubuntu.com/ubuntu-ports/
           Suites: $(lsb_release -cs) $(lsb_release -cs)-updates $(lsb_release -cs)-security        
-          EOF    Components: main universe restricted multiverse
+          Components: main universe restricted multiverse
+          EOF
           rustup target add aarch64-unknown-linux-gnu
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libxkbcommon-dev:arm64 libgbm-dev:arm64 libdrm-dev:arm64 libexpat1-dev:arm64
