@@ -25,7 +25,7 @@ When referring to this project, please use "sommelier-rs" to avoid confusion wit
 1. Install dependencies
 
    ```bash
-   sudo apt-get install build-essential pkg-config libgbm-dev libdrm-dev
+   sudo apt-get install build-essential pkg-config libgbm-dev libdrm-dev libxkbcommon-dev libexpat1-dev
    ```
 
 2. Navigate to the project root:
