@@ -1,0 +1,104 @@
+name: Virtwl Release
+
+on:
+  push:
+    # Trigger this workflow only on tags prefixed with virtwl-
+    # e.g., git tag virtwl-v0.1.1 && git push origin virtwl-v0.1.1
+    tags:
+      - "virtwl-v*"
+
+permissions:
+  contents: write # Required to create the GitHub Release and upload binaries
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify tag matches Cargo.toml
+        run: |
+          # 1. Ask Cargo to parse the TOML, then use jq to extract just the version string
+          CARGO_VERSION=$(cargo read-manifest --manifest-path sommelier/Cargo.toml | jq -r '.version')
+
+          # 2. Extract the pure version number from the tag ("virtwl-v0.1.1" -> "0.1.1")
+          TAG_VERSION="${GITHUB_REF_NAME#virtwl-v}"
+
+          echo "Found Cargo.toml version: ${CARGO_VERSION}"
+          echo "Found Tag version: ${TAG_VERSION}"
+
+          # 3. Compare them and fail fast if they don't match
+          if [ "${CARGO_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "::error::Version mismatch! Cargo.toml says ${CARGO_VERSION} but tag says ${TAG_VERSION}."
+            exit 1
+          fi
+
+          echo "Versions match. Proceeding with build..."
+
+      - name: Install deps (x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get -y install libxkbcommon-dev libgbm-dev libdrm-dev libexpat1-dev
+
+      - name: Install aarch64 dependencies
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's/Types: deb/Types: deb\nArchitectures: amd64 i386/' /etc/apt/sources.list.d/ubuntu.sources
+          cat <<EOF | sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources
+          Types: deb
+          Architectures: arm64
+          URIs: http://ports.ubuntu.com/ubuntu-ports/
+          Suites: $(lsb_release -cs) $(lsb_release -cs)-updates $(lsb_release -cs)-security        
+          Components: main universe restricted multiverse
+          EOF
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libxkbcommon-dev:arm64 libgbm-dev:arm64 libdrm-dev:arm64 libexpat1-dev:arm64
+
+      - name: Build Release Binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --verbose --target ${{ matrix.target }}
+
+      - name: Prepare and Rename Artifact
+        run: |
+          # 1. Get the tag that triggered the run (e.g., "virtwl-v0.1.1")
+          RAW_TAG="${GITHUB_REF_NAME}"
+
+          # 2. Strip the "virtwl-" prefix to get pure version (e.g., "v0.1.1")
+          # This assumes you are tagging with the prefix to avoid colliding with main!
+          VERSION="${RAW_TAG#virtwl-}"
+
+          # 3. Map the verbose Rust target to your short architecture names
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            SHORT_ARCH="x86_64"
+          elif [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            SHORT_ARCH="aarch64"
+          else
+            echo "Error: Unknown matrix target '${{ matrix.target }}'. Failing fast."
+            exit 1
+          fi
+
+          # 4. Define the final output name
+          FINAL_NAME="sommelier_rs_virtwl-${VERSION}-${SHORT_ARCH}"
+
+          # 5. Locate the compiled binary.
+          mv target/${{ matrix.target }}/release/sommelier ./${FINAL_NAME}
+
+          # 6. Expose the new filename as an environment variable for the next step
+          echo "ARTIFACT_NAME=${FINAL_NAME}" >> $GITHUB_ENV
+
+      # --- GitHub Release Upload ---
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2.6.1
+        with:
+          files: ./${{ env.ARTIFACT_NAME }}
+          draft: true
+          prerelease: true
