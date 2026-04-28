@@ -19,7 +19,7 @@ When referring to this project, please use "sommelier-rs" to avoid confusion wit
    For arm64 / aarch64
 
    ```bash
-   wget wget -O sommelier-rs-v0.1.1 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.1.1/sommelier_rs_virtwl-v0.1.1-aarch64
+   wget -O sommelier-rs-v0.1.1 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.1.1/sommelier_rs_virtwl-v0.1.1-aarch64
    ```
 
 2. (If you are running migrating from sommelier, e.g. in ChromeOS guests)
