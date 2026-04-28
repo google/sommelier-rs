@@ -8,13 +8,53 @@ When referring to this project, please use "sommelier-rs" to avoid confusion wit
 
 **This is the `virtwl` branch, it only works when running on a [virtio_wl](https://chromium.googlesource.com/chromiumos/third_party/kernel/+/refs/heads/chromeos-5.4/drivers/virtio/virtio_wl.c) enabled guest kernel.** virtio_wl is not part of mainline Linux kernel, and thus not supported on most distribution kernels. Examples of distribution kernels that support virtio_wl includes ChromiumOS's guest kernel such as the kernel running in Crostini / Baguette.
 
-### Prerequisites
+1. Download the newest version with "virtwl" in its name from [GitHub Releases](https://github.com/google/sommelier-rs/releases) according to your CPU architecture.
 
-- Rust toolchain
-- A Wayland compositor running on the host
-- Linux dependencies
+   For x86_64
+
+   ```bash
+   wget -O sommelier-rs-v0.1.1 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.1.1/sommelier_rs_virtwl-v0.1.1-x86_64
+   ```
+
+   For arm64 / aarch64
+
+   ```bash
+   wget wget -O sommelier-rs-v0.1.1 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.1.1/sommelier_rs_virtwl-v0.1.1-aarch64
+   ```
+
+2. (If you are running migrating from sommelier, e.g. in ChromeOS guests)
+
+   Stop sommerlier's Wayland compositor guest interface (X interface will still be running).
+
+   ```bash
+   systemctl --user stop sommelier@0 sommelier@1
+   ```
+
+3. Give sommelier-rs permission to run
+
+   ```bash
+   chmod +x sommelier-rs-v0.1.1
+   ```
+
+4. Run sommelier-rs
+
+   ```bash
+   ./sommelier-rs-v0.1.1 --virtio-wl /dev/wl0 wayland-0
+   ```
+
+5. Run your favourite Wayland app in a separate terminal, it should automatically find and use sommelier-rs to display its windows
 
 ### Build and Run (on a Debian-compatible distro)
+
+To build, run and develop yourself, follow these steps:
+
+#### Prerequisites
+
+- Rust toolchain
+- A Wayland compositor running on the host passed to guest via virtwl
+- Linux dependencies
+
+#### Instructions
 
 0. Verify virtio_wl support
 
@@ -46,7 +86,7 @@ When referring to this project, please use "sommelier-rs" to avoid confusion wit
    target/release/sommelier --virtio-wl /dev/wl0 wayland-0
    ```
 
-*(Note: Depending on your environment, you may need to stop existing wayland compositors such as sommelier's wayland instances with `systemctl --user stop sommelier@0 sommelier@1`).*
+*(Note: Depending on your environment, you may need to stop existing Wayland compositors such as sommelier's Wayland instances with `systemctl --user stop sommelier@0 sommelier@1`).*
 
 ## Developer Documentation
 
