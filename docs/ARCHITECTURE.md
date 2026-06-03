@@ -74,7 +74,7 @@ The Sommelier-rs proxy sits between Wayland applications running in an isolated 
 
 The Sommelier-rs proxy supports two distinct modes of operation depending on the deployment environment:
 
-1. **Placeholder Proxy (Local Mode):** In this mode, the proxy sits between a Wayland client and a Wayland compositor running on the *same* OS kernel. No VM boundary is crossed. This mode is primarily used for rapid development, testing, and protocol debugging. It allows developers to verify the core ID translation (Shadow Table) logic and basic protocol handling without the complexityc of a virtual machine.
+1. **Placeholder Proxy (Local Mode):** In this mode, the proxy sits between a Wayland client and a Wayland compositor running on the *same* OS kernel. No VM boundary is crossed. This mode is primarily used for rapid development, testing, and protocol debugging. It allows developers to verify the core ID translation (Shadow Table) logic and basic protocol handling without the complexities of a virtual machine.
 2. **Cross-Domain Proxy (VM Mode):** This is the real operational mode where a VM boundary is being crossed. The proxy runs inside a Guest VM and communicates with a Host Compositor. In this mode, it relies heavily on `virtio-gpu` to allocate cross-domain hardware-backed memory (dma-bufs) and tunnel standard Wayland sockets and File Descriptors (FDs) across the boundary, enabling seamless host integration and rendering.
 
 ## 3. Core Components
