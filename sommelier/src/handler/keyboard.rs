@@ -144,16 +144,15 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         }
 
         use std::fs::File;
-        use std::io::{Read, Seek, SeekFrom};
         use std::mem::ManuallyDrop;
+        use std::os::unix::fs::FileExt;
         use std::os::unix::io::FromRawFd;
 
         // Wrap the raw fd safely without taking ownership or closing it.
-        let mut file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
-        let _ = file.seek(SeekFrom::Start(0));
+        let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
 
         let mut buf = vec![0u8; size as usize];
-        if let Ok(bytes_read) = file.read(&mut buf) {
+        if let Ok(bytes_read) = file.read_at(&mut buf, 0) {
             if bytes_read > 0 {
                 // Strip the trailing null terminator if present.
                 let len = if buf[bytes_read - 1] == 0 {
