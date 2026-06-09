@@ -75,28 +75,14 @@ impl HostId {
     }
 }
 
-/// Placeholder guest IDs for host objects bound internally by sommelier.
-///
-/// These are never exposed to the guest client. They occupy the
-/// Wayland server-object range (`>= 0xFF00_0000`), which is reserved for
-/// server-allocated IDs and can never be issued by a guest client.
-///
-/// Each internally bound singleton interface has its own fixed constant.
-/// These are used directly as the placeholder guest ID — there is no
-/// `| host_id` suffix, because each interface is bound at most once and
-/// no two sentinels need to share a prefix.
-pub(crate) mod sentinel {
-    /// zwp_linux_dmabuf_v1 internal bind.
-    pub(crate) const DMABUF: u32 = 0xFFFE_0000;
-    /// wl_shm internal bind.
-    pub(crate) const SHM: u32 = 0xFFFD_0000;
-    /// zwp_text_input_manager_v1 internal bind.
-    pub(crate) const TEXT_INPUT_MANAGER_V1: u32 = 0xFFFC_0000;
-    /// zcr_text_input_extension_v1 internal bind.
-    pub(crate) const TEXT_INPUT_EXTENSION_V1: u32 = 0xFFFB_0000;
-    /// zcr_keyboard_extension_v1 internal bind.
-    pub(crate) const KEYBOARD_EXTENSION: u32 = 0xFFFA_0000;
-}
+// The Wayland protocol reserves object IDs >= 0xFF000000 for server-allocated
+// objects. Client-allocated IDs are constrained to [1, 0xFEFFFFFF] by the
+// server: https://gitlab.freedesktop.org/wayland/wayland/-/blob/main/src/wayland-server.c
+//
+// We no longer use sentinel IDs at all. Instead, each internally-bound
+// interface stores its host ID in a dedicated `ctx.host_*_id` field, and we
+// register it with `track_host_interface` so proxy.rs can dispatch inbound
+// host events without any magic number hackery.
 
 #[allow(dead_code)]
 pub struct ShadowTable {
@@ -448,30 +434,6 @@ mod tests {
         ctx.last_sender_id = 99;
         let hid = HostId::from_event_sender(&ctx);
         assert_eq!(hid.raw(), 99);
-    }
-
-    #[test]
-    fn sentinel_constants_are_distinct() {
-        // Each sentinel must be unique and in the Wayland server-allocated range
-        // (>= 0xFF00_0000), which clients can never issue. This guarantees that
-        // placeholder guest IDs cannot collide with real client-allocated object IDs.
-        let sentinels = [
-            sentinel::DMABUF,
-            sentinel::SHM,
-            sentinel::TEXT_INPUT_MANAGER_V1,
-            sentinel::TEXT_INPUT_EXTENSION_V1,
-            sentinel::KEYBOARD_EXTENSION,
-        ];
-        let unique: std::collections::HashSet<_> = sentinels.iter().collect();
-        assert_eq!(unique.len(), sentinels.len(), "sentinel constants must all be distinct");
-        // All sentinels must be in the Wayland server-object range.
-        for &s in &sentinels {
-            assert!(
-                s >= 0xFF00_0000,
-                "sentinel {:#010x} is below the Wayland server-object range (0xFF00_0000+)",
-                s
-            );
-        }
     }
 }
 

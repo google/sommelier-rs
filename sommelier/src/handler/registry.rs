@@ -23,7 +23,7 @@ use crate::protocols::wayland::wl_shm;
 use crate::protocols::wayland::ALLOWED_INTERFACES as WL_ALLOWED;
 use crate::protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES as XDG_DECORATION_ALLOWED;
 use crate::protocols::xdg_shell::ALLOWED_INTERFACES as XDG_ALLOWED;
-use crate::state::{sentinel, Context, HostId};
+use crate::state::{Context, HostId};
 use crate::wire::{Action, MessageBuilder};
 use log::error;
 
@@ -46,10 +46,10 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             }
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_dmabuf_id = Some(host_id);
-            let placeholder_guest_id = sentinel::DMABUF;
-            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
+            // Register for event dispatch: the host compositor sends format/modifier
+            // events to the dmabuf factory object after we bind it.
             ctx.shadow_table
-                .track_interface(placeholder_guest_id, "zwp_linux_dmabuf_v1".to_string());
+                .track_host_interface(host_id, "zwp_linux_dmabuf_v1".to_string());
 
             let client_version = version;
             let mut global_builder = MessageBuilder::new();
@@ -93,12 +93,8 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "zwp_text_input_manager_v1" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_text_input_manager_v1_id = Some(host_id);
-            let placeholder_guest_id = sentinel::TEXT_INPUT_MANAGER_V1;
-            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
-            ctx.shadow_table.track_interface(
-                placeholder_guest_id,
-                "zwp_text_input_manager_v1".to_string(),
-            );
+            // The host does not send events to the text_input_manager factory; no
+            // shadow table entry needed.
 
             let client_version = 1;
             let mut global_builder = MessageBuilder::new();
@@ -141,12 +137,8 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "zcr_text_input_extension_v1" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_text_input_extension_v1_id = Some(host_id);
-            let placeholder_guest_id = sentinel::TEXT_INPUT_EXTENSION_V1;
-            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
-            ctx.shadow_table.track_interface(
-                placeholder_guest_id,
-                "zcr_text_input_extension_v1".to_string(),
-            );
+            // The host does not send events to the text_input_extension factory; no
+            // shadow table entry needed.
 
             // 2. Bind internally
             let registry_host_id = ctx.last_sender_id;
@@ -172,12 +164,8 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             // controlling host accelerator processing. Not exposed to the guest.
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_keyboard_extension_id = Some(HostId(host_id));
-            let placeholder_guest_id = sentinel::KEYBOARD_EXTENSION;
-            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
-            ctx.shadow_table.track_interface(
-                placeholder_guest_id,
-                "zcr_keyboard_extension_v1".to_string(),
-            );
+            // The host does not send events to the keyboard_extension factory; no
+            // shadow table entry needed.
 
             let registry_host_id = ctx.last_sender_id;
             let mut builder = MessageBuilder::new();
@@ -202,11 +190,9 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "wl_shm" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_shm_id = Some(host_id);
-            // Map to a sentinel placeholder guest ID (Wayland server-object range).
-            let placeholder_guest_id = sentinel::SHM;
-            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
-            ctx.shadow_table
-                .track_interface(placeholder_guest_id, "wl_shm".to_string());
+            // wl_shm is emulated: on_bind drops the guest request and sends synthetic
+            // format events, so the host never sends wl_shm events to us. No shadow
+            // table entry is needed.
 
             // Bind to wl_shm
             let registry_host_id = ctx.last_sender_id;
