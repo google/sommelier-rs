@@ -50,38 +50,66 @@ pub struct Accelerator {
     pub symbol: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseError {
+    InvalidModifier(String),
+    InvalidKeysym(String),
+}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidModifier(tok) => write!(f, "Invalid modifier syntax or tag: '{}'", tok),
+            Self::InvalidKeysym(sym) => write!(f, "Unknown or invalid keysym: '{}'", sym),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+/// Parses a single token into an `Accelerator`, or returns a `ParseError`.
+pub fn parse_accelerator(token: &str) -> Result<Accelerator, ParseError> {
+    let mut token = token.trim();
+    let mut modifiers = 0;
+
+    while token.starts_with('<') {
+        let end_idx = token.find('>').ok_or_else(|| ParseError::InvalidModifier(token.to_string()))?;
+        let mod_tag = &token[..=end_idx];
+        match mod_tag.to_ascii_lowercase().as_str() {
+            "<control>" => modifiers |= CONTROL_MASK,
+            "<alt>" => modifiers |= ALT_MASK,
+            "<shift>" => modifiers |= SHIFT_MASK,
+            _ => return Err(ParseError::InvalidModifier(token.to_string())),
+        }
+        token = &token[end_idx + 1..];
+    }
+
+    if token.is_empty() {
+        return Err(ParseError::InvalidKeysym("Empty keysym".to_string()));
+    }
+
+    let sym = xkb::keysym_from_name(token, xkb::KEYSYM_CASE_INSENSITIVE);
+    if sym.raw() == xkb::keysyms::KEY_NoSymbol {
+        return Err(ParseError::InvalidKeysym(token.to_string()));
+    }
+
+    Ok(Accelerator {
+        modifiers,
+        symbol: sym.raw(),
+    })
+}
+
 /// Parse a `SOMMELIER_ACCELERATORS`-style string into a list of accelerators.
-pub fn parse_accelerators(s: &str) -> Vec<Accelerator> {
+pub fn parse_accelerators(s: &str) -> Result<Vec<Accelerator>, ParseError> {
     let mut result = Vec::new();
     for token in s.split(',') {
-        let mut token = token.trim();
+        let token = token.trim();
         if token.is_empty() {
             continue;
         }
-        let mut modifiers = 0;
-        loop {
-            if token.starts_with("<Control>") {
-                modifiers |= CONTROL_MASK;
-                token = &token[9..];
-            } else if token.starts_with("<Alt>") {
-                modifiers |= ALT_MASK;
-                token = &token[5..];
-            } else if token.starts_with("<Shift>") {
-                modifiers |= SHIFT_MASK;
-                token = &token[7..];
-            } else {
-                break;
-            }
-        }
-        let sym = xkb::keysym_from_name(token, xkb::KEYSYM_CASE_INSENSITIVE);
-        if sym.raw() != xkb::keysyms::KEY_NoSymbol {
-            result.push(Accelerator {
-                modifiers,
-                symbol: sym.raw(),
-            });
-        }
+        result.push(parse_accelerator(token)?);
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -91,8 +119,9 @@ mod tests {
     #[test]
     fn parse_accelerators_standard_list() {
         let list = parse_accelerators(
-            "Super_L,<Alt>bracketleft,<Alt>bracketright,<Control>space,invalid_key_name",
-        );
+            "Super_L,<Alt>bracketleft,<ALT>bracketright,<Control>space",
+        )
+        .unwrap();
         assert_eq!(list.len(), 4);
 
         assert_eq!(list[0].modifiers, 0);
@@ -110,6 +139,33 @@ mod tests {
 
     #[test]
     fn parse_empty_string() {
-        assert!(parse_accelerators("").is_empty());
+        assert!(parse_accelerators("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_fails_on_invalid() {
+        // Unknown keysym
+        assert_eq!(
+            parse_accelerators("invalid_key_name"),
+            Err(ParseError::InvalidKeysym("invalid_key_name".to_string()))
+        );
+
+        // Invalid modifier tag
+        assert_eq!(
+            parse_accelerators("<Ctrl>a"),
+            Err(ParseError::InvalidModifier("<Ctrl>a".to_string()))
+        );
+
+        // Missing closing bracket
+        assert_eq!(
+            parse_accelerators("<Controla"),
+            Err(ParseError::InvalidModifier("<Controla".to_string()))
+        );
+
+        // Multiple modifiers + missing keysym
+        assert_eq!(
+            parse_accelerators("<Control><Alt>"),
+            Err(ParseError::InvalidKeysym("Empty keysym".to_string()))
+        );
     }
 }

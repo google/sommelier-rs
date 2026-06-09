@@ -254,7 +254,8 @@ impl Context {
         };
 
         let accelerators_env = std::env::var("SOMMELIER_ACCELERATORS").unwrap_or_default();
-        let accelerators = crate::accelerator::parse_accelerators(&accelerators_env);
+        let accelerators = crate::accelerator::parse_accelerators(&accelerators_env)
+            .unwrap_or_else(|e| panic!("Invalid SOMMELIER_ACCELERATORS value '{}': {}", accelerators_env, e));
 
         Self {
             shadow_table: ShadowTable::new(),

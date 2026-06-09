@@ -385,7 +385,7 @@ mod tests {
     fn accelerator_keys_are_dropped_and_acked_not_handled() {
         let mut handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a");
+        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
         let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
@@ -418,7 +418,7 @@ mod tests {
     fn non_accelerator_keys_are_forwarded_and_acked_handled() {
         let mut handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a");
+        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
         let wl_key_b = find_keycode(&keymap, xkb::keysyms::KEY_b);
@@ -449,7 +449,7 @@ mod tests {
     fn dropped_key_release_is_also_dropped() {
         let mut handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a");
+        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
         let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
