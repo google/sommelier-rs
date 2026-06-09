@@ -388,17 +388,9 @@ impl Client {
         {
             success = false;
         }
-        // ack_key messages carry no FDs, so reverse_out_fds is normally empty
-        // and this extend is a no-op. It is included for correctness in case the
-        // reverse queue ever carries FDs (e.g. if a future protocol extension adds them).
-        //
-        // Ownership invariant: `conn.send` uses sendmsg(SCM_RIGHTS) which
-        // *duplicates* the FDs into the kernel's cmsg buffer — the original
-        // RawFds are NOT consumed by the send call and remain owned by the
-        // caller. They must be closed here to avoid leaking them.
-        // See `WaylandConnection::send` (connection.rs): after the first
-        // successful sendmsg the slice `fds_to_send` is set to `&[]` so FDs
-        // are never sent twice; the originals are still our responsibility.
+        // Close FDs regardless of send success — we own them and must not leak,
+        // even when the send fails. sendmsg(SCM_RIGHTS) duplicates FDs into the
+        // kernel cmsg buffer; the originals remain our responsibility.
         fds_to_close.extend(reverse_out_fds.iter());
 
         fds_to_close.extend(conn.read_fds.iter().take(fd_offset));

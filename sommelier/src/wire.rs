@@ -249,8 +249,9 @@ impl MessageBuilder {
     pub fn build_message(self, sender_id: u32, opcode: u16) -> Vec<u8> {
         debug_assert!(
             self.payload.len() + 8 <= 0xFFFF,
-            "Wayland message payload too large for wire format ({} bytes)",
-            self.payload.len()
+            "Wayland message too large for wire format: {} payload bytes + 8 header = {} total, limit 65535",
+            self.payload.len(),
+            self.payload.len() + 8,
         );
         let total_len = (self.payload.len() + 8) as u32;
         let mut msg = Vec::with_capacity(8 + self.payload.len());

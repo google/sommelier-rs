@@ -51,7 +51,7 @@ extern "C" {
 
 /// Return the lowercase equivalent of a keysym (safe wrapper around the
 /// `xkb_keysym_to_lower` C function). Pure, no side-effects.
-pub fn keysym_to_lower(sym: u32) -> u32 {
+pub(crate) fn keysym_to_lower(sym: u32) -> u32 {
     // Safety: xkb_keysym_to_lower is a pure C function with no restrictions
     // on its u32 argument — all values are valid keysyms.
     unsafe { xkb_keysym_to_lower_ffi(sym) }
@@ -82,7 +82,7 @@ impl std::fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Parses a single token into an `Accelerator`, or returns a `ParseError`.
-pub fn parse_accelerator(token: &str) -> Result<Accelerator, ParseError> {
+pub(crate) fn parse_accelerator(token: &str) -> Result<Accelerator, ParseError> {
     let mut token = token.trim();
     let mut modifiers = 0;
 
@@ -128,6 +128,9 @@ pub fn parse_accelerators(s: &str) -> Result<Vec<Accelerator>, ParseError> {
     let mut result = Vec::new();
     for token in s.split(',') {
         let token = token.trim();
+        // Intentionally skip empty tokens so that trailing/double commas
+        // (e.g. "Super_L,") in user-provided configs are silently tolerated
+        // rather than rejected with a parse error.
         if token.is_empty() {
             continue;
         }

@@ -408,7 +408,7 @@ impl Context {
     /// the bleed only affects tests that do not; but having a stable constructor
     /// avoids the silent dependency entirely.
     #[cfg(test)]
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Available for tests that need env-var-independent construction.
     pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
         let mut ctx = Self::new(gpu_accel, xdg_decoration);
         ctx.accelerators = accelerators;

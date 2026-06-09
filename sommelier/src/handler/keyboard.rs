@@ -184,7 +184,7 @@ impl KeyboardHandler {
     /// Ensure the `zcr_extended_keyboard_v1` object is bound for this keyboard.
     ///
     /// This is idempotent: if the extended keyboard is already bound for
-    /// `host_keyboard_id`, this method is a no-op.
+    /// `host_keyboard_id`, this function is a no-op.
     ///
     /// This is called from `on_enter` (rather than `wl_seat.get_keyboard`) because
     /// the host keyboard ID (`ctx.last_sender_id` in a host→client event) is only
@@ -201,12 +201,7 @@ impl KeyboardHandler {
     /// this request is processed (e.g. auto-repeat already in-flight) will not have
     /// an active TTL in `pending_key_acks_`; Exo will apply its default policy for
     /// those keys. This mirrors the behavior of the C sommelier reference.
-    ///
-    /// # Side-effect note
-    /// Takes `&self` (no fields of `self` are read or mutated); all mutation
-    /// targets `ctx`. The unusual receiver avoids a double-borrow when the
-    /// caller already holds `&mut self` for `on_enter`.
-    pub(crate) fn ensure_extended_keyboard_bound(&self, ctx: &mut Context, host_keyboard_id: HostId) {
+    pub(crate) fn ensure_extended_keyboard_bound(ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
             if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
                 let host_extended_id = HostId::from_allocated(ctx.shadow_table.allocate_host_id());
@@ -241,11 +236,7 @@ impl KeyboardHandler {
     /// a key event arrived before `on_enter` was processed. This should not happen
     /// in normal Wayland flow (Exo always sends `on_enter` before `key`), so we
     /// emit a warning to aid debugging if it ever occurs.
-    ///
-    /// # Side-effect note
-    /// Takes `&self` (no fields of `self` are read or mutated); all mutation
-    /// targets `ctx`.
-    fn send_ack_key(&self, ctx: &mut Context, host_keyboard_id: HostId, serial: u32, handled: bool) {
+    fn send_ack_key(ctx: &mut Context, host_keyboard_id: HostId, serial: u32, handled: bool) {
         if ctx.host_keyboard_extension_id.is_none() {
             // Protocol not available on this compositor; silently skip.
             return;
@@ -316,9 +307,11 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         match std::str::from_utf8(&slice[..len]) {
             Err(e) => {
                 log::error!("on_keymap: keymap bytes are not valid UTF-8: {}", e);
-                // Clear stale drop state: keys dropped under the old keymap
-                // may map to different keysyms under a future new keymap.
-                // Keeping them would risk stuck keys after the next successful load.
+                // Clear XKB state and drop state together: they must remain
+                // consistent. Leaving state populated while dropped_keys is
+                // cleared (or vice-versa) could cause stuck keys or wrong
+                // accelerator decisions on the next key event.
+                self.state = None;
                 self.dropped_keys.clear();
             }
             Ok(s) => match xkb::Keymap::new_from_string(
@@ -329,7 +322,9 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             ) {
                 None => {
                     log::error!("on_keymap: xkbcommon failed to compile the keymap string");
-                    // Clear stale drop state for the same reason as above.
+                    // Clear XKB state and drop state together for the same
+                    // consistency reason as the UTF-8 error case above.
+                    self.state = None;
                     self.dropped_keys.clear();
                 }
                 Some(keymap) => {
@@ -363,7 +358,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // Lazily bind the extended keyboard object on first enter.
         // This sends zcr_keyboard_extension_v1.get_extended_keyboard to the
         // host, which enables ack mode (SetNeedKeyboardKeyAcks(true) in Exo).
-        self.ensure_extended_keyboard_bound(ctx, host_keyboard_id);
+        Self::ensure_extended_keyboard_bound(ctx, host_keyboard_id);
 
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
@@ -446,7 +441,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 // reference implementation. Exo only queues presses in
                 // pending_key_acks_; sending acks for releases would be a no-op
                 // against non-existent serials but is deliberately avoided for clarity.
-                self.send_ack_key(ctx, host_keyboard_id, serial, handled);
+                Self::send_ack_key(ctx, host_keyboard_id, serial, handled);
             }
             WL_KEY_RELEASED => {
                 // Key released: if we dropped the press, drop the release too
@@ -521,9 +516,17 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId::from_request_sender(ctx)) else {
             return Action::Forward;
         };
-        // Clear any pending dropped-key state so that a re-created keyboard
-        // doesn't suppress releases for keys from its previous session.
+        // Clear per-keyboard state: dropped-key set and modifier bitmask.
+        // Both must be reset so that a re-created keyboard starts from a clean
+        // slate and doesn't inherit stale state from the previous session.
+        //
+        // dropped_keys: a key dropped under the old session would cause its
+        //   release event to be silently swallowed on the new keyboard.
+        // modifiers: if the new keyboard receives a key event before the first
+        //   wl_keyboard.modifiers, the accelerator check would use stale modifier
+        //   bits and could produce wrong NOT_HANDLED/HANDLED decisions.
         self.dropped_keys.clear();
+        self.modifiers = 0;
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
             // zcr_extended_keyboard_v1.destroy — no payload (8-byte header only).
             let msg = crate::wire::MessageBuilder::new()
@@ -802,17 +805,16 @@ mod tests {
 
     #[test]
     fn bind_extended_keyboard_is_idempotent() {
-        let handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
         ctx.host_keyboard_extension_id = Some(HostId(99));
 
         // First call: should send get_extended_keyboard.
-        handler.ensure_extended_keyboard_bound(&mut ctx, HostId(10));
+        KeyboardHandler::ensure_extended_keyboard_bound(&mut ctx, HostId(10));
         assert_eq!(ctx.client_to_host_queue.len(), 1);
 
         // Second call with the same host_keyboard_id: must not send again.
         ctx.client_to_host_queue.clear();
-        handler.ensure_extended_keyboard_bound(&mut ctx, HostId(10));
+        KeyboardHandler::ensure_extended_keyboard_bound(&mut ctx, HostId(10));
         assert!(
             ctx.client_to_host_queue.is_empty(),
             "bind must be idempotent: no second get_extended_keyboard"
@@ -905,12 +907,11 @@ mod tests {
         // Regression: if host_keyboard_extension_id is Some (protocol available)
         // but the keyboard hasn't been registered via on_enter yet, send_ack_key
         // must not panic or silently send a garbage ack. No queue entry expected.
-        let handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
         ctx.host_keyboard_extension_id = Some(HostId(99)); // protocol bound
         // keyboard_to_extended_keyboard is empty (on_enter not yet received)
 
-        handler.send_ack_key(&mut ctx, HostId(10), 1, true);
+        KeyboardHandler::send_ack_key(&mut ctx, HostId(10), 1, true);
 
         assert!(
             ctx.client_to_host_queue.is_empty(),
@@ -922,11 +923,10 @@ mod tests {
     fn opcode_encoding_get_extended_keyboard_is_zero() {
         // Regression: get_extended_keyboard uses opcode 0. Verify the wire
         // message encodes it correctly (not accidentally a non-zero opcode).
-        let handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
         ctx.host_keyboard_extension_id = Some(HostId(99));
 
-        handler.ensure_extended_keyboard_bound(&mut ctx, HostId(10));
+        KeyboardHandler::ensure_extended_keyboard_bound(&mut ctx, HostId(10));
         assert_eq!(ctx.client_to_host_queue.len(), 1);
         let (msg, _) = &ctx.client_to_host_queue[0];
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
@@ -1067,4 +1067,30 @@ mod tests {
             "dropped_keys must be cleared on keymap reload to prevent stuck keys after layout change"
         );
     }
+
+    /// Regression: on_release must reset modifiers to 0 so a re-bound keyboard
+    /// does not inherit stale modifier state from the previous session. Without
+    /// this, a key event arriving before the next wl_keyboard.modifiers could
+    /// be matched against the old (wrong) modifier mask.
+    #[test]
+    fn modifiers_reset_on_release() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+
+        ctx.shadow_table.map_id(5, 10); // guest 5 <-> host 10
+
+        // Inject a modifier state directly (no XKB state needed for this test).
+        handler.modifiers = crate::accelerator::CONTROL_MASK;
+        assert_ne!(handler.modifiers, 0, "precondition: modifiers are non-zero");
+
+        // Release the keyboard (client->host request: last_sender_id = guest ID).
+        ctx.last_sender_id = 5;
+        handler.on_release(&mut ctx);
+
+        assert_eq!(
+            handler.modifiers, 0,
+            "modifiers must be cleared by on_release to avoid stale state on re-bind"
+        );
+    }
 }
+
