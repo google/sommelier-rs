@@ -46,7 +46,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             }
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_dmabuf_id = Some(host_id);
-            let placeholder_guest_id = sentinel::DMABUF | host_id;
+            let placeholder_guest_id = sentinel::DMABUF;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table
                 .track_interface(placeholder_guest_id, "zwp_linux_dmabuf_v1".to_string());
@@ -93,7 +93,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "zwp_text_input_manager_v1" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_text_input_manager_v1_id = Some(host_id);
-            let placeholder_guest_id = sentinel::TEXT_INPUT_MANAGER_V1 | host_id;
+            let placeholder_guest_id = sentinel::TEXT_INPUT_MANAGER_V1;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table.track_interface(
                 placeholder_guest_id,
@@ -141,7 +141,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "zcr_text_input_extension_v1" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_text_input_extension_v1_id = Some(host_id);
-            let placeholder_guest_id = sentinel::TEXT_INPUT_EXTENSION_V1 | host_id;
+            let placeholder_guest_id = sentinel::TEXT_INPUT_EXTENSION_V1;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table.track_interface(
                 placeholder_guest_id,
@@ -172,7 +172,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             // controlling host accelerator processing. Not exposed to the guest.
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_keyboard_extension_id = Some(HostId(host_id));
-            let placeholder_guest_id = sentinel::KEYBOARD_EXTENSION | host_id;
+            let placeholder_guest_id = sentinel::KEYBOARD_EXTENSION;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table.track_interface(
                 placeholder_guest_id,
@@ -202,8 +202,8 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "wl_shm" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_shm_id = Some(host_id);
-            // Map to a high-bit placeholder guest ID
-            let placeholder_guest_id = sentinel::SHM | host_id;
+            // Map to a sentinel placeholder guest ID (Wayland server-object range).
+            let placeholder_guest_id = sentinel::SHM;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table
                 .track_interface(placeholder_guest_id, "wl_shm".to_string());

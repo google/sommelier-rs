@@ -76,23 +76,25 @@ impl HostId {
 
 /// Placeholder guest IDs for host objects bound internally by sommelier.
 ///
-/// These are never exposed to the guest client. They occupy a high-bit
-/// sentinel range that cannot collide with real client-allocated IDs
-/// (which start at 2 and grow monotonically upward from there).
+/// These are never exposed to the guest client. They occupy the
+/// Wayland server-object range (`>= 0xFF00_0000`), which is reserved for
+/// server-allocated IDs and can never be issued by a guest client.
 ///
-/// Each interface gets its own 24-bit prefix to guarantee uniqueness.
-/// The lower 8 bits hold the allocated host ID (≤ 255 per interface).
+/// Each internally bound singleton interface has its own fixed constant.
+/// These are used directly as the placeholder guest ID — there is no
+/// `| host_id` suffix, because each interface is bound at most once and
+/// no two sentinels need to share a prefix.
 pub(crate) mod sentinel {
     /// zwp_linux_dmabuf_v1 internal bind.
-    pub(crate) const DMABUF: u32 = 0xFE00_0000;
+    pub(crate) const DMABUF: u32 = 0xFFFE_0000;
     /// wl_shm internal bind.
-    pub(crate) const SHM: u32 = 0xFD00_0000;
+    pub(crate) const SHM: u32 = 0xFFFD_0000;
     /// zwp_text_input_manager_v1 internal bind.
-    pub(crate) const TEXT_INPUT_MANAGER_V1: u32 = 0xFC00_0000;
+    pub(crate) const TEXT_INPUT_MANAGER_V1: u32 = 0xFFFC_0000;
     /// zcr_text_input_extension_v1 internal bind.
-    pub(crate) const TEXT_INPUT_EXTENSION_V1: u32 = 0xFB00_0000;
+    pub(crate) const TEXT_INPUT_EXTENSION_V1: u32 = 0xFFFB_0000;
     /// zcr_keyboard_extension_v1 internal bind.
-    pub(crate) const KEYBOARD_EXTENSION: u32 = 0xFA00_0000;
+    pub(crate) const KEYBOARD_EXTENSION: u32 = 0xFFFA_0000;
 }
 
 #[allow(dead_code)]
@@ -353,8 +355,20 @@ impl Context {
         };
 
         let accelerators_env = std::env::var("SOMMELIER_ACCELERATORS").unwrap_or_default();
-        let accelerators = crate::accelerator::parse_accelerators(&accelerators_env)
-            .unwrap_or_else(|e| panic!("Invalid SOMMELIER_ACCELERATORS value '{}': {}", accelerators_env, e));
+        let accelerators = match crate::accelerator::parse_accelerators(&accelerators_env) {
+            Ok(list) => list,
+            Err(e) => {
+                // A malformed accelerator config should not crash the proxy — that
+                // would break every app in the container. Degrade to no filtering
+                // (all keys forwarded to guest) and log a clear error.
+                warn!(
+                    "Invalid SOMMELIER_ACCELERATORS '{}': {}. \
+                     Accelerator filtering disabled.",
+                    accelerators_env, e
+                );
+                Vec::new()
+            }
+        };
 
         Self {
             shadow_table: ShadowTable::new(),
@@ -430,7 +444,9 @@ mod tests {
 
     #[test]
     fn sentinel_constants_are_distinct() {
-        // Each sentinel prefix must be unique so they can never collide.
+        // Each sentinel must be unique and in the Wayland server-allocated range
+        // (>= 0xFF00_0000), which clients can never issue. This guarantees that
+        // placeholder guest IDs cannot collide with real client-allocated object IDs.
         let sentinels = [
             sentinel::DMABUF,
             sentinel::SHM,
@@ -439,10 +455,14 @@ mod tests {
             sentinel::KEYBOARD_EXTENSION,
         ];
         let unique: std::collections::HashSet<_> = sentinels.iter().collect();
-        assert_eq!(unique.len(), sentinels.len(), "sentinel prefixes must all be distinct");
-        // Every sentinel must be above the practical client ID range.
+        assert_eq!(unique.len(), sentinels.len(), "sentinel constants must all be distinct");
+        // All sentinels must be in the Wayland server-object range.
         for &s in &sentinels {
-            assert!(s > 0x00FF_FFFF, "sentinel {:#010x} is too close to real client ID range", s);
+            assert!(
+                s >= 0xFF00_0000,
+                "sentinel {:#010x} is below the Wayland server-object range (0xFF00_0000+)",
+                s
+            );
         }
     }
 }

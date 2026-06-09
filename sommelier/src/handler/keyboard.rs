@@ -96,6 +96,12 @@ pub struct KeyboardHandler {
 // xkb::Context, Keymap, and State are not Send, but we only access them from
 // the single-threaded client task. The tokio runtime requires Send for
 // task-spawned futures, so we provide the guarantee manually.
+//
+// NOTE: `MmapView` is NOT a field of `KeyboardHandler`; it is only used as a
+// stack-local inside `on_keymap` and is dropped before returning. Adding an
+// `MmapView` field in the future would violate this Send impl (raw pointer,
+// not Send) and must be re-evaluated at that point.
+//
 // NOTE: Sync is intentionally NOT implemented — xkb::State must never be
 // accessed concurrently from multiple threads.
 unsafe impl Send for KeyboardHandler {}
@@ -109,6 +115,28 @@ impl KeyboardHandler {
             modifiers: 0,
             dropped_keys: std::collections::HashSet::new(),
         }
+    }
+}
+
+impl Default for KeyboardHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeyboardHandler {
+    /// Build a Wayland wire message: `[sender_id(4)][size<<16|opcode(4)][payload...]`.
+    ///
+    /// This is the one place that encodes the Wayland wire framing so that
+    /// callers only need to supply the logical fields. All three internal
+    /// messages (`get_extended_keyboard`, `ack_key`, `destroy`) use this helper.
+    fn build_wayland_msg(sender_id: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
+        let total_len = (payload.len() + 8) as u32;
+        let mut msg = Vec::with_capacity(8 + payload.len());
+        msg.extend_from_slice(&sender_id.to_ne_bytes());
+        msg.extend_from_slice(&((total_len << 16) | opcode as u32).to_ne_bytes());
+        msg.extend_from_slice(payload);
+        msg
     }
 
     /// Check if the pressed key matches any configured host accelerators.
@@ -152,18 +180,11 @@ impl KeyboardHandler {
                     .track_host_interface(host_extended_id.0, "zcr_extended_keyboard_v1".to_string());
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
+                // opcode 0: get_extended_keyboard
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(host_extended_id.0);
                 builder.write_u32(host_keyboard_id.0);
-
-                let mut msg = Vec::new();
-                msg.extend_from_slice(&extension_host_id.0.to_ne_bytes());
-                let len = (builder.payload.len() + 8) as u32;
-                // Opcode 0: get_extended_keyboard. Explicit `| 0u32` for consistency
-                // with send_ack_key which uses `| 1u32`; avoids copy-paste mistakes.
-                let word2 = (len << 16) | 0u32;
-                msg.extend_from_slice(&word2.to_ne_bytes());
-                msg.extend_from_slice(&builder.payload);
+                let msg = Self::build_wayland_msg(extension_host_id.0, 0, &builder.payload);
                 ctx.client_to_host_queue.push((msg, Vec::new()));
                 log::debug!(
                     "Bound extended keyboard: host_extended_id={} for host_keyboard_id={}",
@@ -200,13 +221,8 @@ impl KeyboardHandler {
         let mut builder = MessageBuilder::new();
         builder.write_u32(serial);
         builder.write_u32(handled_val);
-
-        let mut msg = Vec::new();
-        msg.extend_from_slice(&host_extended_id.0.to_ne_bytes());
-        let len = (builder.payload.len() + 8) as u32;
-        let word2 = (len << 16) | 1u32; // opcode 1: ack_key
-        msg.extend_from_slice(&word2.to_ne_bytes());
-        msg.extend_from_slice(&builder.payload);
+        // opcode 1: ack_key
+        let msg = Self::build_wayland_msg(host_extended_id.0, 1, &builder.payload);
         ctx.client_to_host_queue.push((msg, Vec::new()));
     }
 }
@@ -247,17 +263,25 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             slice.len()
         };
 
-        if let Ok(s) = std::str::from_utf8(&slice[..len]) {
-            if let Some(keymap) = xkb::Keymap::new_from_string(
+        match std::str::from_utf8(&slice[..len]) {
+            Err(e) => {
+                log::error!("on_keymap: keymap bytes are not valid UTF-8: {}", e);
+            }
+            Ok(s) => match xkb::Keymap::new_from_string(
                 &self.context,
                 s.to_string(),
                 xkb::KEYMAP_FORMAT_TEXT_V1,
                 xkb::KEYMAP_COMPILE_NO_FLAGS,
             ) {
-                self.state = Some(xkb::State::new(&keymap));
-                self.keymap = Some(keymap);
-                log::info!("XKB keymap loaded successfully");
-            }
+                None => {
+                    log::error!("on_keymap: xkbcommon failed to compile the keymap string");
+                }
+                Some(keymap) => {
+                    self.state = Some(xkb::State::new(&keymap));
+                    self.keymap = Some(keymap);
+                    log::info!("XKB keymap loaded successfully");
+                }
+            },
         }
         // `mapping` drops here, unmapping the region.
 
@@ -359,28 +383,30 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 
-        if state == WL_KEY_PRESSED {
-            // Key pressed: check if this is a host accelerator.
-            if self.is_host_accelerator(&ctx.accelerators, key) {
-                action = Action::Drop;
-                handled = false;
-                self.dropped_keys.insert(key);
+        match state {
+            WL_KEY_PRESSED => {
+                // Key pressed: check if this is a host accelerator.
+                if self.is_host_accelerator(&ctx.accelerators, key) {
+                    action = Action::Drop;
+                    handled = false;
+                    self.dropped_keys.insert(key);
+                }
+                // Send ack_key only for press events, matching the C sommelier
+                // reference implementation. Exo only queues presses in
+                // pending_key_acks_; sending acks for releases would be a no-op
+                // against non-existent serials but is deliberately avoided for clarity.
+                self.send_ack_key(ctx, host_keyboard_id, serial, handled);
             }
-        } else if state == WL_KEY_RELEASED {
-            // Key released: if we dropped the press, drop the release too
-            // to avoid stuck-key state in the guest.
-            if self.dropped_keys.remove(&key) {
-                action = Action::Drop;
-                handled = false;
+            WL_KEY_RELEASED => {
+                // Key released: if we dropped the press, drop the release too
+                // to avoid stuck-key state in the guest.
+                if self.dropped_keys.remove(&key) {
+                    action = Action::Drop;
+                }
             }
-        }
-
-        // Send ack_key only for press events, matching the C sommelier
-        // reference implementation. Exo only queues presses in
-        // pending_key_acks_; sending acks for releases would be a no-op
-        // against non-existent serials but is deliberately avoided for clarity.
-        if state == WL_KEY_PRESSED {
-            self.send_ack_key(ctx, host_keyboard_id, serial, handled);
+            other => {
+                log::warn!("on_key: received unknown key state {}, ignoring", other);
+            }
         }
 
         action
@@ -430,12 +456,12 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId::from_request_sender(ctx)) else {
             return Action::Forward;
         };
+        // Clear any pending dropped-key state so that a re-created keyboard
+        // doesn't suppress releases for keys from its previous session.
+        self.dropped_keys.clear();
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
-            // zcr_extended_keyboard_v1.destroy is opcode 0, no payload.
-            let mut msg = Vec::new();
-            msg.extend_from_slice(&host_extended_id.0.to_ne_bytes());
-            let word2 = 8u32 << 16; // len=8, opcode=0 (destroy)
-            msg.extend_from_slice(&word2.to_ne_bytes());
+            // zcr_extended_keyboard_v1.destroy — opcode 0, no payload.
+            let msg = Self::build_wayland_msg(host_extended_id.0, 0, &[]);
             ctx.client_to_host_queue.push((msg, Vec::new()));
             log::debug!(
                 "Destroyed extended keyboard: host_extended_id={} for host_keyboard_id={}",
@@ -504,7 +530,9 @@ mod tests {
         for k in min..=max {
             let syms = keymap.key_get_syms_by_level(k.into(), 0, 0);
             if syms.iter().any(|s| s.raw() == target) {
-                return k - 8; // Convert XKB keycode to evdev (Wayland) keycode
+                // XKB keycodes = evdev keycode + 8 (XKB_KEYCODE_OFFSET in xkbcommon.h).
+                // Wayland wl_keyboard.key uses evdev keycodes, so subtract 8.
+                return k - 8;
             }
         }
         panic!("keysym {:#x} not found in keymap", target);
@@ -750,6 +778,50 @@ mod tests {
         assert!(handler.keymap.is_none());
     }
 
+    /// Regression: on_keymap must log an error and not crash when the
+    /// keymap data is not valid UTF-8, or when xkbcommon rejects the
+    /// string. In both cases the handler must degrade gracefully:
+    /// keymap stays None, state stays None, Action::Forward is returned.
+    #[test]
+    fn on_keymap_logs_error_on_invalid_utf8() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+
+        use nix::sys::memfd::{memfd_create, MFdFlags};
+        use std::ffi::CString;
+        let name = CString::new("test-bad-keymap").unwrap();
+        let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
+        // Write a lone continuation byte — invalid UTF-8.
+        let bad_bytes: &[u8] = &[0xFF, 0xFE, 0xFD];
+        nix::unistd::write(&fd, bad_bytes).expect("write failed");
+
+        use std::os::unix::io::AsRawFd;
+        let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, fd.as_raw_fd(), bad_bytes.len() as u32);
+        assert_eq!(action, Action::Forward, "invalid UTF-8 must still forward");
+        assert!(handler.keymap.is_none(), "keymap must remain None on parse error");
+        assert!(handler.state.is_none(), "state must remain None on parse error");
+    }
+
+    #[test]
+    fn on_keymap_logs_error_on_invalid_xkb_string() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+
+        use nix::sys::memfd::{memfd_create, MFdFlags};
+        use std::ffi::CString;
+        let name = CString::new("test-bad-xkb").unwrap();
+        let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
+        // Valid UTF-8 but not a valid XKB keymap.
+        let garbage = b"this is not a valid xkb keymap";
+        nix::unistd::write(&fd, garbage).expect("write failed");
+
+        use std::os::unix::io::AsRawFd;
+        let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, fd.as_raw_fd(), garbage.len() as u32);
+        assert_eq!(action, Action::Forward, "invalid XKB string must still forward");
+        assert!(handler.keymap.is_none(), "keymap must remain None on XKB compile error");
+        assert!(handler.state.is_none(), "state must remain None on XKB compile error");
+    }
+
     #[test]
     fn send_ack_key_warns_when_protocol_bound_but_keyboard_not_registered() {
         // Regression: if host_keyboard_extension_id is Some (protocol available)
@@ -782,5 +854,73 @@ mod tests {
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
         let opcode = word2 & 0xFFFF;
         assert_eq!(opcode, 0, "get_extended_keyboard must use opcode 0, got {}", opcode);
+    }
+
+    /// Structural regression: dropped_keys must be cleared when the keyboard is released.
+    ///
+    /// Without the `dropped_keys.clear()` in `on_release`, a re-created keyboard (guest
+    /// destroys and re-creates wl_keyboard, which is common on focus changes) inherits
+    /// stale drop state and silently swallows release events for keys it never saw pressed,
+    /// leaving the guest in a stuck-key state.
+    #[test]
+    fn dropped_keys_cleared_on_release() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+
+        let keymap = load_test_keymap(&mut handler, &mut ctx);
+        let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
+
+        ctx.host_keyboard_extension_id = Some(HostId(99));
+        ctx.keyboard_to_extended_keyboard.insert(HostId(10), HostId(50));
+
+        // Press Ctrl+A (host accelerator) with host keyboard ID 10.
+        let ctrl_mask = 1 << keymap.mod_get_index("Control");
+        handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
+        ctx.last_sender_id = 10; // host keyboard ID (on_key is host→client)
+        let action = handler.on_key(&mut ctx, 1, 0, wl_key_a, WL_KEY_PRESSED);
+        assert_eq!(action, Action::Drop);
+        assert!(handler.dropped_keys.contains(&wl_key_a), "key must be in dropped_keys after drop");
+
+        // Guest destroys the keyboard (client→host: last_sender_id is the guest ID).
+        ctx.shadow_table.map_id(5, 10); // guest 5 ↔ host 10
+        ctx.last_sender_id = 5;
+        handler.on_release(&mut ctx);
+
+        // dropped_keys must be empty after release — the new session starts clean.
+        assert!(
+            handler.dropped_keys.is_empty(),
+            "dropped_keys must be cleared by on_release to avoid stuck-key on re-bind"
+        );
+
+        // A release of the same key on the re-bound keyboard should now be forwarded,
+        // not silently dropped.
+        ctx.last_sender_id = 10;
+        let release_action = handler.on_key(&mut ctx, 2, 0, wl_key_a, WL_KEY_RELEASED);
+        assert_eq!(
+            release_action,
+            Action::Forward,
+            "release of key not in dropped_keys must be forwarded after re-bind"
+        );
+    }
+
+    /// Structural test: `build_wayland_msg` must produce well-formed wire frames.
+    ///
+    /// This catches any future refactoring that breaks the `[sender][size<<16|opcode][payload]`
+    /// encoding, which would silently corrupt all internal protocol messages.
+    #[test]
+    fn build_wayland_msg_encodes_frame_correctly() {
+        let payload = [0x01u8, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]; // two u32 words
+        let msg = KeyboardHandler::build_wayland_msg(42, 7, &payload);
+
+        let sender = u32::from_ne_bytes(msg[0..4].try_into().unwrap());
+        assert_eq!(sender, 42, "sender_id wrong");
+
+        let expected_total_len = 8u32 + payload.len() as u32; // header + payload
+        let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
+        assert_eq!(word2 >> 16, expected_total_len, "size field wrong");
+        assert_eq!(word2 & 0xFFFF, 7, "opcode field wrong");
+
+        assert_eq!(&msg[8..], &payload, "payload bytes wrong");
     }
 }

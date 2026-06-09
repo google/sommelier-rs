@@ -90,10 +90,12 @@ pub fn parse_accelerator(token: &str) -> Result<Accelerator, ParseError> {
         let end_idx = token.find('>').ok_or_else(|| ParseError::InvalidModifier(token.to_string()))?;
         let mod_tag = &token[..=end_idx];
         match mod_tag.to_ascii_lowercase().as_str() {
-            "<control>" => modifiers |= CONTROL_MASK,
-            "<alt>" => modifiers |= ALT_MASK,
+            // Accept both the full XKB names and common shorthands used in
+            // C sommelier configs so that users can copy configs verbatim.
+            "<control>" | "<ctrl>" => modifiers |= CONTROL_MASK,
+            "<alt>" | "<meta>" => modifiers |= ALT_MASK,
             "<shift>" => modifiers |= SHIFT_MASK,
-            "<super>" => modifiers |= SUPER_MASK,
+            "<super>" | "<win>" => modifiers |= SUPER_MASK,
             _ => return Err(ParseError::InvalidModifier(token.to_string())),
         }
         token = &token[end_idx + 1..];
@@ -169,10 +171,10 @@ mod tests {
             Err(ParseError::InvalidKeysym("invalid_key_name".to_string()))
         );
 
-        // Invalid modifier tag
+        // Totally unknown modifier tag (not a shorthand or full name)
         assert_eq!(
-            parse_accelerators("<Ctrl>a"),
-            Err(ParseError::InvalidModifier("<Ctrl>a".to_string()))
+            parse_accelerators("<Hyper>a"),
+            Err(ParseError::InvalidModifier("<Hyper>a".to_string()))
         );
 
         // Missing closing bracket
@@ -186,6 +188,21 @@ mod tests {
             parse_accelerators("<Control><Alt>"),
             Err(ParseError::InvalidKeysym("Empty keysym".to_string()))
         );
+    }
+
+    /// Structural regression: <Ctrl> (shorthand) must be accepted, not rejected.
+    /// Users who copy configs from the C sommelier docs use <Ctrl> not <Control>.
+    #[test]
+    fn parse_ctrl_shorthand_is_accepted() {
+        let list = parse_accelerators("<Ctrl>space").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].modifiers, CONTROL_MASK);
+        assert_eq!(list[0].symbol, xkb::keysyms::KEY_space);
+
+        // <Meta> is a synonym for <Alt>
+        let list = parse_accelerators("<Meta>Tab").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].modifiers, ALT_MASK);
     }
 
     #[test]
