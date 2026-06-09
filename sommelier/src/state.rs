@@ -131,6 +131,7 @@ impl ShadowTable {
                 return id;
             }
         }
+        log::error!("sommelier: host Wayland object ID space exhausted");
         panic!("sommelier: host Wayland object ID space exhausted — this should never happen");
     }
 
@@ -419,7 +420,6 @@ impl Context {
     /// ensuring tests always run against a known accelerator configuration
     /// regardless of the environment.
     #[cfg(test)]
-    #[allow(dead_code)] // Available for tests that need env-var-independent construction.
     pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
         let mut ctx = Self::new(gpu_accel, xdg_decoration);
         ctx.accelerators = accelerators;

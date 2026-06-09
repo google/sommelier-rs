@@ -24,6 +24,10 @@ limitations under the License.
 //! SOMMELIER_ACCELERATORS="Super_L,<Alt>bracketleft,<Alt>bracketright,<Control>space"
 //! ```
 //!
+//! Accepted modifier tags (case-insensitive):
+//!   `<Control>` / `<Ctrl>`, `<Alt>` / `<Meta>`,
+//!   `<Shift>`, `<Super>` / `<Win>` / `<Search>`.
+//!
 //! Keys matching this list are acked as `NOT_HANDLED` via
 //! `zcr_extended_keyboard_v1.ack_key`, causing the host to process the
 //! accelerator. All other keys are acked as `HANDLED`, keeping them in the
@@ -223,6 +227,16 @@ mod tests {
     #[test]
     fn parse_search_alias_for_super() {
         let list = parse_accelerators("<Search>space").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].modifiers, SUPER_MASK);
+        assert_eq!(list[0].symbol, xkb::keysyms::KEY_space);
+    }
+
+    /// Regression: <Win> (Windows-style key name) must be accepted as Super.
+    /// Users copying configs from non-ChromeOS systems may use <Win>.
+    #[test]
+    fn parse_win_alias_for_super() {
+        let list = parse_accelerators("<Win>space").unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].modifiers, SUPER_MASK);
         assert_eq!(list[0].symbol, xkb::keysyms::KEY_space);

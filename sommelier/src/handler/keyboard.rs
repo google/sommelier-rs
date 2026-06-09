@@ -334,7 +334,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             }
             Ok(s) => match xkb::Keymap::new_from_string(
                 &self.context,
-                s.to_string(),
+                // `new_from_string` takes ownership; copy required because `s`
+                // borrows from the mmap region which is dropped at the end of
+                // this function.
+                s.to_owned(),
                 xkb::KEYMAP_FORMAT_TEXT_V1,
                 xkb::KEYMAP_COMPILE_NO_FLAGS,
             ) {
@@ -446,9 +449,11 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 
-        // Match order matters: WL_KEY_PRESSED = 1, WL_KEY_RELEASED = 0.
-        // The `other` arm must remain last to catch unknown states without
-        // accidentally matching 0 before WL_KEY_RELEASED does.
+        // WL_KEY_PRESSED = 1, WL_KEY_RELEASED = 0.
+        // `other` catches any future unknown state values (e.g. if Wayland adds
+        // a new key-repeat state) without silently falling through to a wrong arm.
+        // In Rust, integer match arms are unordered — each arm matches its exact
+        // pattern and `other` fires only for values not matched above.
         match state {
             WL_KEY_PRESSED => {
                 // Key pressed: check if this is a host accelerator.
@@ -822,6 +827,11 @@ mod tests {
         let fd = memfd_create(name.as_c_str(), MFdFlags::empty())
             .expect("memfd_create failed");
         nix::unistd::write(&fd, keymap_bytes).expect("write failed");
+        // Write the NUL terminator that on_keymap expects (wl_keyboard.keymap.size
+        // always includes it). Without this, the mmap covers one byte beyond what
+        // was written; we'd rely on OS zero-fill of fresh anonymous pages, which is
+        // guaranteed on Linux but is not required by POSIX.
+        nix::unistd::write(&fd, &[0u8]).expect("write NUL failed");
         // Deliberately do NOT seek back to 0.
         // read()/pread() from here would get 0 bytes or fail.
         // mmap with offset 0 must still work.
@@ -1182,6 +1192,21 @@ mod tests {
         assert_eq!(
             handler.modifiers, 0,
             "modifiers must be cleared by on_release to avoid stale state on re-bind"
+        );
+    }
+
+    /// N8: on_release with an unknown guest keyboard ID (keyboard that never
+    /// received on_enter) must return Forward without panicking or queuing anything.
+    #[test]
+    fn on_release_with_unknown_guest_id_forwards_gracefully() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        // last_sender_id 999 is not in the shadow table.
+        ctx.last_sender_id = 999;
+        assert_eq!(handler.on_release(&mut ctx), Action::Forward);
+        assert!(
+            ctx.client_to_host_queue.is_empty(),
+            "no destroy message should be queued for an unknown keyboard"
         );
     }
 }

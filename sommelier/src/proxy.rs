@@ -386,6 +386,9 @@ impl Client {
         if !reverse_out_buf.is_empty()
             && conn.send(&reverse_out_buf, &reverse_out_fds).await.is_err()
         {
+            // success=false signals the caller (handle_msgs) to drop this client
+            // connection. We cannot return early here because we still own
+            // reverse_out_fds and must close them below to avoid fd leaks.
             success = false;
             // Do NOT return early here: we must still close `reverse_out_fds`
             // below. sendmsg(SCM_RIGHTS) copies FDs into the kernel cmsg buffer;
