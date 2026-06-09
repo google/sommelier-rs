@@ -158,7 +158,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 let mut msg = Vec::new();
                 msg.extend_from_slice(&extension_host_id.to_ne_bytes());
                 let len = (builder.payload.len() + 8) as u32;
-                let word2 = (len << 16) | 0u32; // opcode 0: get_extended_keyboard
+                let word2 = len << 16; // opcode 0: get_extended_keyboard
                 msg.extend_from_slice(&word2.to_ne_bytes());
                 msg.extend_from_slice(&builder.payload);
                 ctx.client_to_host_queue.push((msg, Vec::new()));
@@ -325,67 +325,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     }
 }
 
-// --- Keyboard shortcuts inhibit protocol handlers ---
-//
-// The zwp_keyboard_shortcuts_inhibit_manager_v1 protocol is forwarded to the
-// host for standard Wayland compliance. Guest clients (e.g. games, terminals)
-// may request shortcut inhibition for specific surfaces. We track the state
-// locally so future enhancements can respect the guest's intent.
 
-impl crate::protocols::keyboard_shortcuts_inhibit_unstable_v1::zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1Handler for KeyboardHandler {
-    fn on_inhibit_shortcuts(
-        &mut self,
-        ctx: &mut Context,
-        id: u32,
-        surface: u32,
-        seat: u32,
-    ) -> Action {
-        log::debug!(
-            "zwp_keyboard_shortcuts_inhibit_manager_v1.inhibit_shortcuts: id={}, surface={}, seat={}",
-            id, surface, seat
-        );
-        ctx.shortcut_inhibitors.insert(
-            id,
-            crate::state::ShortcutInhibitorState {
-                active: false,
-            },
-        );
-        Action::Forward
-    }
-}
-
-impl crate::protocols::keyboard_shortcuts_inhibit_unstable_v1::zwp_keyboard_shortcuts_inhibitor_v1::ZwpKeyboardShortcutsInhibitorV1Handler for KeyboardHandler {
-    fn on_destroy(&mut self, ctx: &mut Context) -> Action {
-        let host_id = ctx.last_sender_id;
-        let guest_id = ctx.shadow_table.get_guest_id(host_id).unwrap_or(0);
-        if guest_id != 0 {
-            ctx.shortcut_inhibitors.remove(&guest_id);
-        }
-        Action::Forward
-    }
-
-    fn on_active(&mut self, ctx: &mut Context) -> Action {
-        let host_id = ctx.last_sender_id;
-        let guest_id = ctx.shadow_table.get_guest_id(host_id).unwrap_or(0);
-        if guest_id != 0 {
-            if let Some(state) = ctx.shortcut_inhibitors.get_mut(&guest_id) {
-                state.active = true;
-            }
-        }
-        Action::Forward
-    }
-
-    fn on_inactive(&mut self, ctx: &mut Context) -> Action {
-        let host_id = ctx.last_sender_id;
-        let guest_id = ctx.shadow_table.get_guest_id(host_id).unwrap_or(0);
-        if guest_id != 0 {
-            if let Some(state) = ctx.shortcut_inhibitors.get_mut(&guest_id) {
-                state.active = false;
-            }
-        }
-        Action::Forward
-    }
-}
 
 // Empty impls for keyboard extension protocol handlers.
 // We don't receive requests/events on these; we only send ack_key.

@@ -211,15 +211,8 @@ pub struct TextInputState {
     pub text_change_cause: u32,
 }
 
-/// Tracks whether a guest-created keyboard shortcuts inhibitor is active.
-#[derive(Debug, Clone)]
-pub struct ShortcutInhibitorState {
-    pub active: bool,
-}
-
 pub struct Context {
     pub shadow_table: ShadowTable,
-    pub shortcut_inhibitors: HashMap<u32, ShortcutInhibitorState>,
     pub pools: HashMap<u32, Arc<PoolState>>,
     pub buffers: HashMap<u32, BufferState>,
     pub surfaces: HashMap<u32, SurfaceState>,
@@ -265,7 +258,6 @@ impl Context {
 
         Self {
             shadow_table: ShadowTable::new(),
-            shortcut_inhibitors: HashMap::new(),
             pools: HashMap::new(),
             buffers: HashMap::new(),
             surfaces: HashMap::new(),

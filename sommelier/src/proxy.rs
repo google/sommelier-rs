@@ -153,10 +153,11 @@ impl Client {
             protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::fractional_scale_v1::dispatch_request(interface, msg, handler, ctx)
-        } else if protocols::keyboard_shortcuts_inhibit_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
-            protocols::keyboard_shortcuts_inhibit_unstable_v1::dispatch_request(interface, msg, handler, ctx)
-        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
-            protocols::keyboard_extension_unstable_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface)
+        {
+            protocols::keyboard_extension_unstable_v1::dispatch_request(
+                interface, msg, handler, ctx,
+            )
         } else {
             Ok(None)
         }
@@ -190,9 +191,8 @@ impl Client {
             protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::fractional_scale_v1::dispatch_event(interface, msg, handler, ctx)
-        } else if protocols::keyboard_shortcuts_inhibit_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
-            protocols::keyboard_shortcuts_inhibit_unstable_v1::dispatch_event(interface, msg, handler, ctx)
-        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface)
+        {
             protocols::keyboard_extension_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else {
             Ok(None)
@@ -465,12 +465,7 @@ impl protocols::xdg_decoration_unstable_v1::ProtocolHandler for SommelierHandler
 protocols::fractional_scale_v1::impl_sommelier_delegates!(SommelierHandler, {});
 impl protocols::fractional_scale_v1::ProtocolHandler for SommelierHandler {}
 
-// Keyboard Shortcuts Inhibit Protocol
-protocols::keyboard_shortcuts_inhibit_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {
-    zwp_keyboard_shortcuts_inhibit_manager_v1: keyboard,
-    zwp_keyboard_shortcuts_inhibitor_v1: keyboard
-});
-impl protocols::keyboard_shortcuts_inhibit_unstable_v1::ProtocolHandler for SommelierHandler {}
+
 
 // Keyboard Extension Protocol (ChromeOS-specific)
 protocols::keyboard_extension_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {

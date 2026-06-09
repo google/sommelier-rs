@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 use crate::protocols::fractional_scale_v1::ALLOWED_INTERFACES as FRACTIONAL_SCALE_ALLOWED;
-use crate::protocols::keyboard_shortcuts_inhibit_unstable_v1::ALLOWED_INTERFACES as SHORTCUTS_INHIBIT_ALLOWED;
 use crate::protocols::linux_dmabuf_v1::ALLOWED_INTERFACES as DMABUF_ALLOWED;
 use crate::protocols::text_input_unstable_v3::ALLOWED_INTERFACES as TEXT_INPUT_ALLOWED;
 use crate::protocols::viewporter::ALLOWED_INTERFACES as VIEWPORTER_ALLOWED;
@@ -232,7 +231,6 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             || TEXT_INPUT_ALLOWED.contains(&interface.as_str())
             || (XDG_DECORATION_ALLOWED.contains(&interface.as_str()) && ctx.xdg_decoration)
             || FRACTIONAL_SCALE_ALLOWED.contains(&interface.as_str())
-            || SHORTCUTS_INHIBIT_ALLOWED.contains(&interface.as_str())
             || interface == "wl_data_device_manager";
 
         if !is_allowed {

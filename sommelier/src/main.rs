@@ -16,6 +16,7 @@ limitations under the License.
 
 use clap::Parser;
 
+mod accelerator;
 mod allocator;
 mod connection;
 mod handler;
@@ -24,7 +25,6 @@ mod state;
 mod virtwl;
 mod virtwl_channel;
 mod wire;
-mod accelerator;
 
 mod protocols {
     include!(concat!(env!("OUT_DIR"), "/wayland_protocol.rs"));
@@ -51,10 +51,6 @@ mod protocols {
     include!(concat!(
         env!("OUT_DIR"),
         "/keyboard_extension_unstable_v1_protocol.rs"
-    ));
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/keyboard_shortcuts_inhibit_unstable_v1_protocol.rs"
     ));
 }
 
