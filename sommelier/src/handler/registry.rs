@@ -195,7 +195,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             full_msg.extend_from_slice(&builder.payload);
 
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
-            log::info!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
+            log::debug!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
 
             return Action::Drop;
         } else if interface == "wl_shm" {
@@ -285,11 +285,6 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         ctx.shadow_table.map_id(*guest_new_id, host_new_id);
         ctx.shadow_table
             .track_interface(*guest_new_id, interface.clone());
-
-        // Track the host-side shortcuts inhibit manager so we can reference it.
-        if interface == "zwp_keyboard_shortcuts_inhibit_manager_v1" {
-            ctx.host_keyboard_shortcuts_inhibit_manager_id = Some(host_new_id);
-        }
 
         // We need to send the bind request to the host.
         // The sender is the registry object.

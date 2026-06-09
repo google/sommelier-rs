@@ -211,11 +211,9 @@ pub struct TextInputState {
     pub text_change_cause: u32,
 }
 
-/// State for a guest-created keyboard shortcuts inhibitor.
+/// Tracks whether a guest-created keyboard shortcuts inhibitor is active.
 #[derive(Debug, Clone)]
 pub struct ShortcutInhibitorState {
-    pub guest_surface_id: u32,
-    pub guest_seat_id: u32,
     pub active: bool,
 }
 
@@ -237,10 +235,8 @@ pub struct Context {
     pub host_shm_id: Option<u32>,
     pub host_text_input_manager_v1_id: Option<u32>,
     pub host_text_input_extension_v1_id: Option<u32>,
-    /// Host-side zcr_keyboard_extension_v1 object ID (bound internally).
+    /// Host-side zcr_keyboard_extension_v1 object ID (bound internally on startup).
     pub host_keyboard_extension_id: Option<u32>,
-    /// Host-side zwp_keyboard_shortcuts_inhibit_manager_v1 object ID.
-    pub host_keyboard_shortcuts_inhibit_manager_id: Option<u32>,
     /// Maps host_keyboard_id → host_extended_keyboard_id for ack_key.
     pub keyboard_to_extended_keyboard: HashMap<u32, u32>,
     /// Parsed SOMMELIER_ACCELERATORS: keys the host should handle.
@@ -286,7 +282,6 @@ impl Context {
             host_text_input_manager_v1_id: None,
             host_text_input_extension_v1_id: None,
             host_keyboard_extension_id: None,
-            host_keyboard_shortcuts_inhibit_manager_id: None,
             keyboard_to_extended_keyboard: HashMap::new(),
             accelerators,
             supported_formats: HashSet::new(),

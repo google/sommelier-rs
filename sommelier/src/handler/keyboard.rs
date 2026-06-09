@@ -115,8 +115,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             return Action::Forward;
         };
 
-        let slice =
-            unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, size as usize) };
+        let slice = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, size as usize) };
 
         // Strip the trailing null terminator if present.
         let len = if size > 0 && slice[size as usize - 1] == 0 {
@@ -169,10 +168,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 let host_extended_id = ctx.shadow_table.allocate_host_id();
                 ctx.keyboard_to_extended_keyboard
                     .insert(host_keyboard_id, host_extended_id);
-                ctx.shadow_table.track_host_interface(
-                    host_extended_id,
-                    "zcr_extended_keyboard_v1".to_string(),
-                );
+                ctx.shadow_table
+                    .track_host_interface(host_extended_id, "zcr_extended_keyboard_v1".to_string());
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
                 let mut builder = MessageBuilder::new();
@@ -302,9 +299,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
         // Send ack_key if we have an extended keyboard for this keyboard.
         // This is what actually controls whether the host runs the accelerator.
-        if let Some(&host_extended_id) =
-            ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id)
-        {
+        if let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) {
             let handled_val: u32 = if handled { 1 } else { 0 };
             let mut builder = MessageBuilder::new();
             builder.write_u32(serial);
@@ -373,8 +368,6 @@ impl crate::protocols::keyboard_shortcuts_inhibit_unstable_v1::zwp_keyboard_shor
         ctx.shortcut_inhibitors.insert(
             id,
             crate::state::ShortcutInhibitorState {
-                guest_surface_id: surface,
-                guest_seat_id: seat,
                 active: false,
             },
         );
@@ -424,10 +417,11 @@ impl crate::protocols::keyboard_extension_unstable_v1::zcr_extended_keyboard_v1:
 mod tests {
     use super::*;
     use crate::protocols::wayland::wl_keyboard::WlKeyboardHandler;
-    use std::io::Write;
     use std::os::unix::io::AsRawFd;
 
-    /// Helper: create a temp keymap file and load it into the handler.
+    /// Helper: create an anonymous memfd, write the default keymap into it,
+    /// and call on_keymap so the handler builds its XKB state. Returns the
+    /// keymap object so tests can look up keycodes.
     fn load_test_keymap(handler: &mut KeyboardHandler, ctx: &mut Context) -> xkb::Keymap {
         let dummy_ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let keymap = xkb::Keymap::new_from_names(
@@ -442,10 +436,15 @@ mod tests {
         .unwrap();
         let keymap_str = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
 
-        let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(keymap_str.as_bytes()).unwrap();
-        let fd = f.as_raw_fd();
-        handler.on_keymap(ctx, 1, fd, keymap_str.len() as u32 + 1);
+        // Use an anonymous memfd so we don't need the `tempfile` crate.
+        // nix is already a dependency of the main crate.
+        use nix::sys::memfd::{memfd_create, MFdFlags};
+        use std::ffi::CString;
+        let name = CString::new("sommelier-test-keymap").unwrap();
+        let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
+        nix::unistd::write(&fd, keymap_str.as_bytes()).expect("write failed");
+
+        handler.on_keymap(ctx, 1, fd.as_raw_fd(), keymap_str.len() as u32 + 1);
         assert!(handler.keymap.is_some(), "keymap should be loaded");
         keymap
     }
@@ -486,7 +485,10 @@ mod tests {
         assert_eq!(action, Action::Drop, "accelerator key should be dropped");
 
         // Verify ack_key was sent with handled=NOT_HANDLED (0)
-        assert!(!ctx.client_to_host_queue.is_empty(), "ack_key should be queued");
+        assert!(
+            !ctx.client_to_host_queue.is_empty(),
+            "ack_key should be queued"
+        );
         let (msg, _) = &ctx.client_to_host_queue[0];
         // Message: [sender_id(4)] [size_opcode(4)] [serial(4)] [handled(4)]
         let handled_val = u32::from_ne_bytes(msg[12..16].try_into().unwrap());
@@ -512,7 +514,11 @@ mod tests {
         // Ctrl+B is NOT in accelerators → forward to guest
         ctx.client_to_host_queue.clear();
         let action = handler.on_key(&mut ctx, 43, 0, wl_key_b, 1);
-        assert_eq!(action, Action::Forward, "non-accelerator key should be forwarded");
+        assert_eq!(
+            action,
+            Action::Forward,
+            "non-accelerator key should be forwarded"
+        );
 
         // Verify ack_key was sent with handled=HANDLED (1)
         let (msg, _) = &ctx.client_to_host_queue[0];
