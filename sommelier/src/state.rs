@@ -74,14 +74,9 @@ impl HostId {
     }
 }
 
-// The Wayland protocol reserves object IDs >= 0xFF000000 for server-allocated
-// objects. Client-allocated IDs are constrained to [1, 0xFEFFFFFF] by the
-// server: https://gitlab.freedesktop.org/wayland/wayland/-/blob/main/src/wayland-server.c
-//
-// We no longer use sentinel IDs at all. Instead, each internally-bound
-// interface stores its host ID in a dedicated `ctx.host_*_id` field, and we
-// register it with `track_host_interface` so proxy.rs can dispatch inbound
-// host events without any magic number hackery.
+// Each internally-bound interface stores its host ID in a dedicated
+// `ctx.host_*_id` field, and we register it with `track_host_interface`
+// so proxy.rs can dispatch inbound host events without any magic number hackery.
 
 #[allow(dead_code)]
 pub struct ShadowTable {
@@ -106,19 +101,24 @@ impl ShadowTable {
     }
 
     pub fn allocate_host_id(&mut self) -> u32 {
-        // NOTE: If every ID in [2, u32::MAX] is simultaneously live this loop
-        // will never terminate. In practice sommelier proxies a single Wayland
-        // session whose total object count is bounded by the compositor (Exo
-        // caps it in the thousands), so exhaustion is not a realistic concern.
-        loop {
+        // Scan at most u32::MAX candidates. In practice sommelier proxies a
+        // single Wayland session whose total object count is bounded by the
+        // compositor (Exo caps it in the thousands), so exhaustion is not a
+        // realistic concern — but an infinite spin is far worse than a panic.
+        for _ in 0..u32::MAX {
+            // `id` is the candidate we are testing this iteration.
             let id = self.next_host_id;
-            // Advance and skip the Wayland-reserved IDs 0 (null) and 1 (wl_display).
-            // wrapping_add(1).max(2) handles the u32::MAX → 0 → 2 wrap in one step.
+            // Advance the counter; .max(2) handles the u32::MAX → 0 → 2 wrap
+            // in one step, keeping 0 (null) and 1 (wl_display) permanently skipped.
             self.next_host_id = self.next_host_id.wrapping_add(1).max(2);
+            // Accept only IDs ≥ 2 that are not already assigned.
+            // (The pre-advance id could be 0 or 1 if next_host_id was initialised
+            // to those values externally, e.g. in tests.)
             if id >= 2 && !self.host_to_guest.contains_key(&id) {
                 return id;
             }
         }
+        panic!("sommelier: host Wayland object ID space exhausted — this should never happen");
     }
 
     pub fn map_id(&mut self, guest_id: u32, host_id: u32) {

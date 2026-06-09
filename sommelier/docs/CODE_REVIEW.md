@@ -1,313 +1,322 @@
-# Code Review: `feature/keyboard-extension-v2` vs `virtwl`
+# Code Review: `zcr_keyboard_extension_v1` — virtwl upstream diff
 
-**Reviewer:** (Google Engineer)
-**Date:** 2026-06-10
-**Scope:** `git diff virtwl..HEAD` — 1,953 insertions, 80 deletions across 19 files
+**Reviewer:** Google Engineer  
+**Branch:** `feature/keyboard-extension-v2` vs `origin/virtwl`  
+**Files changed:** 13 (+2258 / −37)  
+**Tests:** 24 passed, 0 failed ✅
 
 ---
 
 ## Summary
 
-This CL adds `zcr_keyboard_extension_v1` support to `sommelier-rs`, implementing
-the accelerator-passthrough mechanism that lets the ChromeOS host compositor
-(Exo) intercept keyboard shortcuts (e.g. Ctrl+Space for IME) before the Wayland
-guest sees them. The core approach is sound and the implementation is
-significantly more robust than a naïve port of the C sommelier reference.
-The typed `GuestId`/`HostId` wrappers in particular prevent an entire class of
-direction-confusion bugs that were endemic in the original C code.
+This CL adds ChromeOS accelerator passthrough to `sommelier-rs` via the
+`zcr_keyboard_extension_v1` protocol. The scope is well-contained: a new
+`accelerator.rs` module, extension of `KeyboardHandler`, shadow-table typed
+ID wrappers (`GuestId`/`HostId`), removal of sentinel placeholder IDs, and
+bidirectional queue flushing in the proxy loop.
 
-Overall this is **close to LGTM**, with a handful of items that should be fixed
-or at least discussed before submission.
-
----
-
-## Critical / Must-Fix
-
-### C1 — `unsafe impl Send for KeyboardHandler` is unsound if `xkb::State` is `!Send`
-
-**File:** `sommelier/src/handler/keyboard.rs`
-
-The comment says xkb objects are only ever accessed from the single Tokio task.
-That is true *today*, but the `unsafe impl Send` is a global assertion visible
-to the entire compiler. If someone later moves the handler into a `tokio::spawn`
-or a `rayon` pool by accident, the compiler will not catch it.
-
-The safer pattern is to wrap the non-Send fields in a `newtype` that is
-explicitly `!Sync` and document the contract there, or — if the Tokio executor
-is always single-threaded for this code path — pin the runtime to
-`tokio::runtime::Builder::new_current_thread()` so that `Send` bounds are never
-required in the first place.
-
-As written, this is technically unsound. It will not cause UB in practice
-*unless* the task migration invariant is violated, but it is a footgun. At
-minimum, the comment should say **"this impl must be audited any time the
-executor or handler lifecycle changes"** more prominently.
-
-**Recommendation:** Either gate on a single-threaded executor (preferred for
-this use case) or add a `PhantomData<*mut ()>` field to statically opt the
-struct out of `Sync` and add a runtime assertion that the handler is only ever
-used from one thread.
+Overall the implementation is solid: unsafe code is minimal and well-justified,
+the type system catches direction bugs at compile time, and test coverage is
+thorough. The comments below range from **blocking** issues to **nits**.
 
 ---
 
-### C2 — `build_wayland_msg` encodes size incorrectly for multi-word payloads
+## Blocking / Must-Fix
 
-**File:** `sommelier/src/handler/keyboard.rs`, line ~158
+### 1. Opcode constants are load-bearing but have no compile-time tie to the XML
+
+**File:** `src/handler/keyboard.rs:41–53`
 
 ```rust
-msg.extend_from_slice(&((total_len << 16) | opcode as u32).to_ne_bytes());
+// If the XML is ever updated, these constants MUST be kept in sync.
+const ZCR_EXTENDED_KEYBOARD_DESTROY: u16 = 0;
+const ZCR_EXTENDED_KEYBOARD_ACK_KEY: u16 = 1;
+const ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD: u16 = 0;
 ```
 
-The Wayland wire format packs `size` in the **upper 16 bits** of the second
-word and `opcode` in the **lower 16 bits**. `total_len << 16` is a `u32`
-left-shift — this is correct only if `total_len` fits in 16 bits. The
-`debug_assert!` checks this at test time, but it fires only in debug builds.
+The comment says "MUST be kept in sync" but there is no mechanism that
+enforces this. The build system already generates a Rust protocol file from
+the XML (`build.rs`). The generated code almost certainly contains typed
+request/event enumerations or associated constants. **The generated opcode
+values should be referenced here rather than re-declared as magic numbers.**
 
-More critically: `opcode` is declared as `u16` but is widened to `u32` with
-`| opcode as u32`. If `opcode` is wider than 16 bits this truncates silently —
-but since `opcode` is already `u16`, casting it to `u32` is fine. No bug here
-on the current call-sites, but the encoding comment says:
+If `build.rs`'s code-gen does not expose per-message opcode constants today,
+add them (or at minimum add a `#[test]` that reads the XML at test time and
+asserts the values match). A stale constant here silently corrupts every ack
+and destroy message sent to Exo.
 
-> `[size<<16|opcode(4)]`
+### 2. `build_wayland_msg` duplicates serialization already done by `MessageBuilder`
 
-The comment is wrong — the size field is **bits 31:16** of the word (it is
-*already* the upper half), not `size << 16`. The `total_len` value must be the
-*total message length in bytes* (header + payload), which is what is computed.
-Verify this matches the actual wire format:
+**File:** `src/handler/keyboard.rs:160–177` and `src/handler/registry.rs:96–105`
 
-- Word 1: `object_id` (u32)
-- Word 2: `(message_size_bytes << 16) | opcode` (u32)
+Two callers construct raw wire frames by hand (length word, opcode packing,
+`extend_from_slice`). `MessageBuilder` exists precisely to encapsulate this.
+The keyboard handler's private `build_wayland_msg` is an API-compatible
+alternative — but having two such helpers makes every future reader wonder
+which to use, and risks them diverging.
 
-That is: the **upper 16 bits** contain total byte-length, **lower 16** contain
-opcode. The current code does this correctly (`(total_len << 16) | opcode`).
-The comment is just slightly confusing. **Fix the comment.**
+Either:
+- Extend `MessageBuilder` to accept an explicit sender-id and opcode, making
+  it suitable for both use-sites; or
+- At minimum, add a `debug_assert` that the hand-rolled layout matches
+  `MessageBuilder`'s output in a unit test.
 
-The test `build_wayland_msg_encodes_frame_correctly` validates this, but it
-only runs in test builds. Consider also validating with a const-eval if possible
-in the future.
-
----
-
-### C3 — `smallvec = "*"` in `Cargo.toml` — **must not land upstream**
-
-**File:** `sommelier/Cargo.toml`
-
-```toml
-smallvec = "*"
-```
-
-Wildcard versions are explicitly prohibited by Cargo policy and will cause `cargo
-publish` to reject the crate. More practically, they break reproducibility —
-a `cargo update` six months from now can silently pull in a semver-incompatible
-`smallvec 2.x`.
-
-**Fix:** Pin to a concrete version, e.g. `smallvec = "1.13"`.
-
-Additionally, consider whether `SmallVec` is pulling its weight here. The
-hot-path benefit (avoiding a `Vec::new()` allocation for 16-byte ack messages)
-is real, but it adds a dependency and complicates the queue type signature
-(`Vec<(SmallVec<[u8;32]>, Vec<RawFd>)>`). An alternative is to keep `Vec<u8>`
-for the buffers and preallocate with `Vec::with_capacity(16)` — the savings are
-identical on the happy path since allocators cache small sizes.
-
-This is worth a quick team discussion: if the performance gain is deemed
-necessary, pin the version and explicitly enable `smallvec`'s `union` feature
-for the true inline storage.
+This is not a correctness bug today, but it is a maintainability hazard.
 
 ---
 
-## Non-Critical / Suggestions
+## Should-Fix
 
-### S1 — `bind_extended_keyboard` is called from `on_enter`; document the ordering invariant
+### 3. `allocate_host_id` can infinite-loop if the ID space is exhausted
 
-**File:** `sommelier/src/handler/keyboard.rs`, `bind_extended_keyboard`
-
-The comment correctly explains why `on_enter` is used instead of
-`wl_seat.get_keyboard`. However, Exo's `SetNeedKeyboardKeyAcks(true)` is set
-the moment it processes `get_extended_keyboard`. If a `wl_keyboard.key` event
-was already queued by the compositor (e.g. auto-repeat keys queued before
-`on_enter` lands), those events will arrive **before** `ack_key` mode is
-enabled, meaning the TTL window will not be running for them.
-
-This is not a bug in your code (C sommelier has the same race), but it should be
-documented. Add a comment noting that keys pressed before `on_enter` will not
-have an active TTL and will be handled by Exo's default policy.
-
----
-
-### S2 — `dropped_keys` is a `HashSet<u32>` but will almost always contain 0 or 1 elements
-
-**File:** `sommelier/src/handler/keyboard.rs`
-
-A `HashSet` for tracking dropped keys has `O(1)` ops but non-trivial constant
-overhead (heap allocation, hash state). In practice a user holds at most 2–3
-keys simultaneously. A `SmallVec<[u32; 4]>` or even a plain `[Option<u32>; 4]`
-with linear search would be allocation-free for the common case.
-
-Not a correctness issue — just a micro-optimization worth considering if
-allocator pressure matters in the event loop.
-
----
-
-### S3 — `on_modifiers` only tracks `DEPRESSED | LATCHED`, not `LOCKED`
-
-**File:** `sommelier/src/handler/keyboard.rs`, `on_modifiers`
+**File:** `src/state.rs`
 
 ```rust
-let components = xkb::STATE_MODS_DEPRESSED | xkb::STATE_MODS_LATCHED;
+// NOTE: If every ID in [2, u32::MAX] is simultaneously live this loop
+// will never terminate.
+loop {
+    ...
+}
 ```
 
-`Caps Lock` is a `LOCKED` modifier. If an accelerator list includes
-`<Shift>something` (where Shift is effectively active via Caps Lock), the check
-will fail because `STATE_MODS_LOCKED` is excluded. The C sommelier uses
-`XKB_STATE_MODS_EFFECTIVE` which ORs all three. Consider whether this is the
-intended policy. If Caps Lock accelerators are out of scope, add a comment
-explaining why locked modifiers are excluded.
+The comment acknowledges this. Given that Exo caps object counts in the
+thousands, infinite looping is not a realistic runtime concern — but the
+comment's passive "not a realistic concern" framing is not good enough for a
+production proxy. Replace the `loop` with a bounded attempt:
+
+```rust
+// Try at most u32::MAX times; panic rather than spin forever.
+for _ in 0..u32::MAX {
+    ...
+    if id >= 2 && !self.host_to_guest.contains_key(&id) {
+        return id;
+    }
+}
+panic!("sommelier: host object ID space exhausted (this cannot happen in practice)");
+```
+
+A `panic!` with a clear message is far preferable to a process freeze that
+requires `SIGKILL` to recover from.
+
+### 4. `on_keymap` does not reset `state` when keymap reloads
+
+**File:** `src/handler/keyboard.rs:334–339`
+
+```rust
+Some(keymap) => {
+    self.state = Some(xkb::State::new(&keymap));
+    self.keymap = Some(keymap);
+```
+
+This is correct for the common case (compositor sends one keymap per session).
+However, the Wayland spec explicitly allows the compositor to send a new
+`wl_keyboard.keymap` at any time (e.g. when the user switches input method or
+keyboard layout). When that happens, `dropped_keys` should be cleared:
+keys dropped under the old keymap (whose keysyms may differ under the new one)
+could cause stuck-key state. A one-liner `self.dropped_keys.clear()` in the
+`Some(keymap)` branch makes the invariant explicit.
+
+### 5. `send_ack_key` is `fn` on `&self` but calls `push` on `ctx`
+
+**File:** `src/handler/keyboard.rs:258`
+
+```rust
+fn send_ack_key(&self, ctx: &mut Context, ...)
+```
+
+This method mutates `ctx.client_to_host_queue` (push) but takes `&self`.
+That is fine from a Rust perspective, but it makes the signature misleading:
+a reader expects `&self` methods to be pure queries. Consider either:
+
+- Making it `&mut self` (consistent with `on_key`), or
+- Keeping it `&self` but adding a doc comment noting the side-effect on `ctx`.
+
+Same applies to `bind_extended_keyboard`.
+
+### 6. Missing `<Hyper>` / `<Super>` alias asymmetry
+
+**File:** `src/accelerator.rs:104`
+
+```rust
+"<super>" | "<win>" => modifiers |= SUPER_MASK,
+```
+
+`<Win>` is accepted as a shorthand for `<Super>`. But C sommelier configs
+also sometimes use `<Search>` (the ChromeOS Search/Launcher key maps to Super
+on Chromebooks). If you want this to be a drop-in replacement for C sommelier
+configs, add `"<search>"` as an alias here. Not blocking, but worth a TODO
+comment at minimum.
+
+### 7. `KeyboardHandler::new()` and `Default` are split across two `impl` blocks
+
+**File:** `src/handler/keyboard.rs:134–151`
+
+```rust
+impl KeyboardHandler {
+    pub fn new() -> Self { ... }
+}
+
+impl Default for KeyboardHandler {
+    fn default() -> Self { Self::new() }
+}
+```
+
+Rust convention (and Clippy's `clippy::new_without_default` lint) wants
+`Default` implemented when `new()` takes no arguments. That's done — good.
+But having two separate `impl KeyboardHandler` blocks immediately adjacent
+(one for `new()`, one for message helpers) is noise. Merge them.
 
 ---
 
-### S4 — `allocate_host_id` wrap-around still has a subtle issue
+## Nits / Style
 
-**File:** `sommelier/src/state.rs`
+### 8. `WL_KEY_RELEASED = 0` should use a named constant in the match arm
+
+**File:** `src/handler/keyboard.rs:455`
+
+```rust
+WL_KEY_RELEASED => { ... }
+```
+
+This is correct, but note that `WL_KEY_RELEASED` is `0` and an unnamed
+`_` arm would match any other value including `0`. The current ordering
+(`PRESSED` = 1 first, `RELEASED` = 0 second, `other` last) is correct.
+Add an inline comment that the order matters because `0` is the last explicit
+arm before the catch-all.
+
+### 9. `MmapView` is `pub(crate)` but only used in one module
+
+`MmapView` has `pub(crate)` visibility and is exported from `keyboard.rs` via
+`pub(crate) struct MmapView`. Its only consumer is `on_keymap` in the same
+file. Make it `pub(super)` or just private (`struct MmapView`) since it is an
+implementation detail of the keymap-loading logic.
+
+### 10. `registry.rs`: `zcr_keyboard_extension_v1` bind uses `MessageBuilder` partially
+
+**File:** `src/handler/registry.rs:88–104`
+
+```rust
+let mut builder = MessageBuilder::new();
+builder.write_u32(name);
+builder.write_string(interface);
+builder.write_u32(1);
+builder.write_u32(host_id);
+
+let mut full_msg = Vec::new();
+full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
+let len = (builder.payload.len() + 8) as u32;
+let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
+...
+```
+
+This is the same hand-rolled framing as point 2. All the other `on_global`
+arms in `registry.rs` follow the same pattern, so this is consistent within
+the file. But it further motivates fixing point 2: one `MessageBuilder::build`
+call should cover the header too.
+
+### 11. `allocate_host_id` wrap logic is clever but not obviously correct
+
+**File:** `src/state.rs`
 
 ```rust
 self.next_host_id = self.next_host_id.wrapping_add(1).max(2);
+if id >= 2 && !self.host_to_guest.contains_key(&id) {
+    return id;
+}
 ```
 
-The comment says "handles the u32::MAX → 0 → 2 wrap in one step", but the
-logic is:
-
-1. `next_host_id = u32::MAX`
-2. `wrapping_add(1)` → `0`
-3. `.max(2)` → `2`
-
-Then the outer check `if id >= 2` tests the **old** value (`u32::MAX`), which
-passes. So `u32::MAX` would be returned if it is not in the map. This is
-actually correct — the only change is skipping 0 and 1 in the _next_ cycle.
-
-The subtle issue: if the table is completely full (all IDs from 2 to
-`u32::MAX` are live), this loops forever. The original code had the same bug.
-For a reviewer this is a known limitation acceptable in practice; just add a
-comment explicitly noting that the function assumes the table is never
-exhausted.
-
----
-
-### S5 — `remove_host_interface` comment should mention the recycle window
-
-**File:** `sommelier/src/state.rs`
-
-The doc comment says "prevent stale events for the recycled ID from being
-dispatched". Add a note that `peek_key` events (protocol v2+) may arrive after
-the `destroy` request is sent but before Exo processes it (pipelining). Exo
-should not send events after seeing `destroy`, but documenting the potential
-race helps future auditors.
-
----
-
-### S6 — `is_host_accelerator` clones `keysym_to_lower` at match-time even though it's pre-normalised at parse-time
-
-**File:** `sommelier/src/handler/keyboard.rs`, `is_host_accelerator`
+The `id >= 2` guard on the *old* value of `next_host_id` combined with
+`.max(2)` on the *new* value is correct but requires careful reading.
+A short inline comment explaining the two-invariant dance would help:
 
 ```rust
-let lower_sym = crate::accelerator::keysym_to_lower(sym.raw());
-for acc in accelerators {
-    if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
+// Advance the counter; .max(2) handles the 0→1→2 skip after u32::MAX wrap.
+self.next_host_id = self.next_host_id.wrapping_add(1).max(2);
+// Check the *pre-advance* id (which we tentatively return).
+if id >= 2 && !self.host_to_guest.contains_key(&id) {
+    return id;
+}
 ```
 
-The `lower_sym` call is a cross-FFI call on each key event. For most keysyms
-this is a no-op (they are already lowercase), but the FFI overhead is real.
-Consider caching the lowercased sym: it is already computed at parse time (in
-`parse_accelerator`). The match site could be simplified to just compare
-`sym.raw()` if the production `Accelerator` is always stored lowercased (which
-it is — the parse sets `symbol: keysym_to_lower(...)`). However, the runtime
-keysym from `key_get_one_sym` may still be uppercase (e.g. `KEY_A` when Shift
-is held), so the lowercasing at the match site is correct. The FFI cost is
-acceptable for key-event frequency (60 Hz worst case for auto-repeat).
+### 12. Test helper `load_test_keymap` passes `keymap_str.len() + 1` as `size`
 
-This is not a bug — just noted for completeness.
-
----
-
-### S7 — Wire message hand-serialization is fragile; consider generated protocol bindings
-
-**File:** `sommelier/src/handler/keyboard.rs` and `registry.rs`
-
-The CL hand-serializes Wayland messages with `extend_from_slice` and hardcoded
-opcodes (`ZCR_EXTENDED_KEYBOARD_ACK_KEY = 1`). The codegen infrastructure from
-`wayland_codegen` already generates typed request builders for other protocols.
-Using generated code for `zcr_keyboard_extension_v1` requests would eliminate
-the opcode magic constants and the risk of mismatched payload sizes.
-
-The `build_wayland_msg` helper is a good abstraction layer, but it still
-requires callers to know the opcode numerically. At minimum, the opcode
-constants should live in the generated `keyboard_extension_unstable_v1` module,
-not in `keyboard.rs`.
-
----
-
-### S8 — Empty protocol handler impls should get a doc comment
-
-**File:** `sommelier/src/handler/keyboard.rs`
+**File:** `src/handler/keyboard.rs:589`
 
 ```rust
-impl crate::protocols::keyboard_extension_unstable_v1::zcr_keyboard_extension_v1::ZcrKeyboardExtensionV1Handler for KeyboardHandler {}
-impl crate::protocols::keyboard_extension_unstable_v1::zcr_extended_keyboard_v1::ZcrExtendedKeyboardV1Handler for KeyboardHandler {}
+handler.on_keymap(ctx, 1, fd.as_raw_fd(), keymap_str.len() as u32 + 1);
 ```
 
-These look suspicious at first glance (why implement a trait with no methods?).
-Add a comment: `// No host→client events expected; impl satisfies the dispatch trait.`
+The `+ 1` accounts for the null terminator that `on_keymap` strips. The
+`size` argument to `wl_keyboard.keymap` per the Wayland spec is "the number
+of bytes in the keymap, **including the null terminator**". So `+ 1` is
+technically correct — but it means the test is also testing the null-stripping
+logic, which is intentional but should be noted in the doc comment. The
+`keymap_loads_from_non_rewound_memfd` test does the same and this is fine;
+just add a comment in `load_test_keymap` explaining why `+1`.
+
+### 13. Unused `MessageBuilder` import in `keyboard.rs`
+
+**File:** `src/handler/keyboard.rs:31`
+
+```rust
+use crate::wire::{Action, MessageBuilder};
+```
+
+`MessageBuilder` is used in `on_enter` and `on_leave` (for the text-input
+synthetic events). This is fine, but given those methods were pre-existing,
+it's worth checking if `MessageBuilder` is also used anywhere in the new
+keyboard-extension code paths. It is not — the new paths use
+`build_wayland_msg` instead. That is consistent but reinforces point 2.
 
 ---
 
 ## Positive Observations
 
-These are things done *well* that I'd call out in a real review:
+- **`GuestId` / `HostId` newtypes** are an excellent choice. The
+  `from_event_sender` / `from_request_sender` constructor names make the
+  direction explicit at every call site, and the `PhantomData<*mut ()>` trick
+  for `!Sync` without a raw pointer field is idiomatic.
 
-- **`GuestId`/`HostId` typed wrappers** — excellent. This is the single most
-  important correctness improvement over the C reference. The direction bug in
-  `on_release` (using guest ID as host map key) is exactly the kind of error
-  that killed the original implementation, and the type system now makes it
-  impossible.
+- **`MmapView` RAII** correctly confines all `unsafe` to one type. The
+  `from_fd` → `as_bytes` → `Drop` contract is clearly documented and sound.
 
-- **`MmapView` RAII** — clean, minimal, well-documented unsafe surface. The
-  `from_fd(len=0) → None` guard is important since `mmap(len=0)` is POSIX UB.
+- **Sentinel ID removal** in `registry.rs` is a clean simplification. The old
+  `0xFE000000 | host_id` placeholder pattern was brittle (potential ID
+  collision, confusing semantics). `track_host_interface` is the right
+  abstraction.
 
-- **Graceful degradation on `SOMMELIER_ACCELERATORS` parse error** — logging
-  and falling back to "no accelerators" is the right behavior for a proxy.
-  Crashing would break every app in the container.
+- **Bidirectional queue flush** in `proxy.rs` is necessary and the ordering
+  rationale (forwarded key arrives at guest before ack reaches host, within
+  Exo's 1000 ms TTL) is well-documented.
 
-- **Bidirectional queue flush in `proxy.rs`** — this was a silent latency
-  bug in any implementation that didn't flush back-channel messages. The
-  `ack_key` arrives at Exo within the same epoll cycle that delivered the key
-  event, well inside the 1 000 ms TTL.
+- **Test coverage** is comprehensive: 24 tests covering normal flow, edge
+  cases (zero-size keymap, invalid UTF-8, invalid XKB, unknown format),
+  regression cases (non-rewound fd, dropped-keys on release), and structural
+  invariants (wire frame encoding). The wire-frame byte-level assertions are
+  particularly valuable for catching silent serialization regressions.
 
-- **`bind_extended_keyboard` idempotency** and the corresponding test — good
-  defensive coding; calling `on_enter` multiple times for the same keyboard must
-  not send duplicate `get_extended_keyboard` requests.
-
-- **Test coverage** — 14 unit tests, including a regression for the
-  `on_keymap`-via-`mmap` path and the `dropped_keys.clear()` on release.
-  This is solid for a first pass. The tests directly assert wire byte layout,
-  which is the right level of detail for a serialization layer.
-
-- **Removal of placeholder sentinel IDs** (`0xFE000000 | host_id` etc.) from
-  `registry.rs` — these magic numbers were a ticking time bomb; the new
-  `track_host_interface`-only approach is much cleaner.
+- **`SOMMELIER_ACCELERATORS` parse robustness**: degrading to empty list on
+  parse error (rather than panicking or silently ignoring all keys) is the
+  right policy for a proxy that must not crash every app in the container.
 
 ---
 
-## Pre-Submit Checklist
+## Summary Table
 
-- [ ] **C3:** Pin `smallvec` to a concrete version (or remove the dependency)
-- [ ] **C2:** Fix the `build_wayland_msg` comment to match the actual wire encoding
-- [ ] **C1:** Either document the `unsafe impl Send` invariant more strongly or switch to single-threaded executor
-- [ ] **S3:** Decide and document the `LOCKED` modifier policy in `on_modifiers`
-- [ ] **S4:** Add a comment in `allocate_host_id` noting the "table full" infinite loop
-- [ ] **S7:** Move `ZCR_EXTENDED_KEYBOARD_ACK_KEY` etc. to the generated protocol module
-- [ ] Run `cargo clippy --all-targets -- -D warnings` — verify clean
+| # | Severity | File | Issue |
+|---|----------|------|-------|
+| 1 | **Blocking** | `keyboard.rs` | Opcode constants not tied to generated XML constants |
+| 2 | **Should-fix** | `keyboard.rs`, `registry.rs` | Duplicate wire-frame serialization logic |
+| 3 | **Should-fix** | `state.rs` | `allocate_host_id` can loop forever on exhaustion |
+| 4 | **Should-fix** | `keyboard.rs` | `on_keymap` should clear `dropped_keys` on keymap reload |
+| 5 | Nit | `keyboard.rs` | `send_ack_key(&self)` signature misleads (mutates ctx) |
+| 6 | Nit | `accelerator.rs` | Missing `<Search>` alias for ChromeOS Search key |
+| 7 | Nit | `keyboard.rs` | Split adjacent `impl KeyboardHandler` blocks |
+| 8 | Nit | `keyboard.rs` | Comment the match-arm ordering in `on_key` |
+| 9 | Nit | `keyboard.rs` | `MmapView` visibility wider than needed |
+| 10 | Nit | `registry.rs` | Hand-rolled framing (consistent with existing style but reinforces #2) |
+| 11 | Nit | `state.rs` | `allocate_host_id` wrap logic needs inline comment |
+| 12 | Nit | `keyboard.rs` | `+ 1` in test helper should be documented |
+| 13 | Nit | `keyboard.rs` | `MessageBuilder` imported but not used by new code paths |
 
----
-
-*This review was performed against `git diff virtwl..feature/keyboard-extension-v2`
-(~1,953 insertions). No runtime testing was performed by the reviewer.*
+**LGTM with the two blocking and four should-fix items addressed.**

@@ -95,7 +95,10 @@ pub fn parse_accelerator(token: &str) -> Result<Accelerator, ParseError> {
             "<control>" | "<ctrl>" => modifiers |= CONTROL_MASK,
             "<alt>" | "<meta>" => modifiers |= ALT_MASK,
             "<shift>" => modifiers |= SHIFT_MASK,
-            "<super>" | "<win>" => modifiers |= SUPER_MASK,
+            // <Search> is the ChromeOS Launcher/Search key; it maps to Super
+            // on Chromebooks. Accept it so users can copy C sommelier configs verbatim.
+            // TODO: add <Hyper> if upstream ChromeOS configs ever use it.
+            "<super>" | "<win>" | "<search>" => modifiers |= SUPER_MASK,
             _ => return Err(ParseError::InvalidModifier(token.to_string())),
         }
         token = &token[end_idx + 1..];
@@ -208,6 +211,15 @@ mod tests {
     #[test]
     fn parse_super_modifier() {
         let list = parse_accelerators("<Super>space").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].modifiers, SUPER_MASK);
+        assert_eq!(list[0].symbol, xkb::keysyms::KEY_space);
+    }
+
+    /// Regression: <Search> (ChromeOS Launcher key) must be accepted as Super.
+    #[test]
+    fn parse_search_alias_for_super() {
+        let list = parse_accelerators("<Search>space").unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].modifiers, SUPER_MASK);
         assert_eq!(list[0].symbol, xkb::keysyms::KEY_space);

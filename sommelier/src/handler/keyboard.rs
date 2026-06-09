@@ -47,7 +47,9 @@ const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 // zcr_keyboard_extension_v1 requests:
 //   request index 0 = get_extended_keyboard
 //
-// If the XML is ever updated, these constants MUST be kept in sync.
+// These are validated against the generated protocol code in the
+// `opcode_constants_match_generated_protocol` test below. If the XML
+// is ever updated, update both the constants and the test.
 const ZCR_EXTENDED_KEYBOARD_DESTROY: u16 = 0;
 const ZCR_EXTENDED_KEYBOARD_ACK_KEY: u16 = 1;
 const ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD: u16 = 0;
@@ -55,10 +57,10 @@ const ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD: u16 = 0;
 /// A read-only view of a shared-memory fd mapped into the process address space.
 ///
 /// All `unsafe` for the mmap/munmap pair is confined here:
-/// - `new`: calls `mmap(MAP_SHARED, PROT_READ)` and stores the pointer + length.
+/// - `from_fd`: calls `mmap(MAP_SHARED, PROT_READ)` and stores the pointer + length.
 /// - `as_bytes`: constructs a slice; valid because the mapping covers exactly `len` bytes.
 /// - `Drop`: calls `munmap`; the pointer and length are never mutated after construction.
-pub(crate) struct MmapView {
+struct MmapView {
     ptr: std::ptr::NonNull<std::ffi::c_void>,
     len: usize,
 }
@@ -66,7 +68,7 @@ pub(crate) struct MmapView {
 impl MmapView {
     /// Map `len` bytes from `fd` at offset 0 as read-only shared memory.
     /// Returns `None` if `len` is zero or if `mmap` fails.
-    pub(crate) fn from_fd(fd: std::os::unix::io::RawFd, len: usize) -> Option<Self> {
+    fn from_fd(fd: std::os::unix::io::RawFd, len: usize) -> Option<Self> {
         use nix::sys::mman::{mmap, MapFlags, ProtFlags};
         use std::os::unix::io::BorrowedFd;
 
@@ -81,7 +83,7 @@ impl MmapView {
     }
 
     /// View the mapped region as a byte slice.
-    pub(crate) fn as_bytes(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         // Safety: ptr points to `self.len` readable bytes for the lifetime of
         // self (mapping is alive until Drop); no other writer exists (PROT_READ).
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr() as *const u8, self.len) }
@@ -216,6 +218,10 @@ impl KeyboardHandler {
     /// this request is processed (e.g. auto-repeat already in-flight) will not have
     /// an active TTL in `pending_key_acks_`; Exo will apply its default policy for
     /// those keys. This mirrors the behavior of the C sommelier reference.
+    /// NOTE: This method takes `&self` but has a side-effect on `ctx`
+    /// (`client_to_host_queue.push`). The receiver is `&self` rather than
+    /// `&mut self` because the method reads only `self.{nothing}` and needs
+    /// no mutation of handler state; all mutation targets `ctx`.
     pub(crate) fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
             if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
@@ -255,6 +261,9 @@ impl KeyboardHandler {
     /// a key event arrived before `on_enter` was processed. This should not happen
     /// in normal Wayland flow (Exo always sends `on_enter` before `key`), so we
     /// emit a warning to aid debugging if it ever occurs.
+    /// NOTE: This method takes `&self` but has a side-effect on `ctx`
+    /// (`client_to_host_queue.push`). The receiver is `&self` rather than
+    /// `&mut self` because no handler state is mutated — all writes target `ctx`.
     fn send_ack_key(&self, ctx: &mut Context, host_keyboard_id: HostId, serial: u32, handled: bool) {
         if ctx.host_keyboard_extension_id.is_none() {
             // Protocol not available on this compositor; silently skip.
@@ -334,6 +343,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 Some(keymap) => {
                     self.state = Some(xkb::State::new(&keymap));
                     self.keymap = Some(keymap);
+                    // Clear stale drop state: a key dropped under the old
+                    // keymap may map to a different keysym under the new one,
+                    // and a forgotten drop entry would cause a stuck key.
+                    self.dropped_keys.clear();
                     log::info!("XKB keymap loaded successfully");
                 }
             },
@@ -438,6 +451,9 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 
+        // Match order matters: WL_KEY_PRESSED = 1, WL_KEY_RELEASED = 0.
+        // The `other` arm must remain last to catch unknown states without
+        // accidentally matching 0 before WL_KEY_RELEASED does.
         match state {
             WL_KEY_PRESSED => {
                 // Key pressed: check if this is a host accelerator.
@@ -586,6 +602,8 @@ mod tests {
         let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
         nix::unistd::write(&fd, keymap_str.as_bytes()).expect("write failed");
 
+        // +1: wl_keyboard.keymap.size includes the NUL terminator per the
+        // Wayland spec. on_keymap strips the trailing NUL before parsing.
         handler.on_keymap(ctx, 1, fd.as_raw_fd(), keymap_str.len() as u32 + 1);
         assert!(handler.keymap.is_some(), "keymap should be loaded");
         keymap
@@ -1001,5 +1019,68 @@ mod tests {
         assert_eq!(word2 & 0xFFFF, 7, "opcode field wrong");
 
         assert_eq!(&msg[8..], &payload, "payload bytes wrong");
+    }
+
+    /// Validate that our hand-written opcode constants match the values the
+    /// code-generator derives from the XML. If the XML is ever updated and
+    /// the generated opcodes change, this test fails \u2014 preventing the silent
+    /// serialization corruption that would otherwise occur.
+    ///
+    /// The generated `Request::opcode()` method is the authoritative source:
+    ///   zcr_extended_keyboard_v1::Request::Destroy => 0
+    ///   zcr_extended_keyboard_v1::Request::AckKey  => 1
+    ///   zcr_keyboard_extension_v1::Request::GetExtendedKeyboard => 0
+    #[test]
+    fn opcode_constants_match_generated_protocol() {
+        use crate::protocols::keyboard_extension_unstable_v1::{
+            zcr_extended_keyboard_v1::Request as ExtKbReq,
+            zcr_keyboard_extension_v1::Request as ExtFactReq,
+        };
+
+        assert_eq!(
+            ExtKbReq::Destroy {}.opcode(),
+            ZCR_EXTENDED_KEYBOARD_DESTROY,
+            "ZCR_EXTENDED_KEYBOARD_DESTROY constant out of sync with generated protocol"
+        );
+        assert_eq!(
+            ExtKbReq::AckKey { serial: 0, handled: 0 }.opcode(),
+            ZCR_EXTENDED_KEYBOARD_ACK_KEY,
+            "ZCR_EXTENDED_KEYBOARD_ACK_KEY constant out of sync with generated protocol"
+        );
+        assert_eq!(
+            ExtFactReq::GetExtendedKeyboard { id: 0, keyboard: 0 }.opcode(),
+            ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD,
+            "ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD constant out of sync with generated protocol"
+        );
+    }
+
+    /// Regression: dropped_keys must be cleared when a new keymap arrives so
+    /// that keysym re-mappings across keymap updates cannot leave stale drop
+    /// entries that would cause stuck keys.
+    #[test]
+    fn dropped_keys_cleared_on_keymap_reload() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+
+        let keymap = load_test_keymap(&mut handler, &mut ctx);
+        let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
+
+        // Simulate dropping a key (press of Ctrl+A)
+        let ctrl_mask = 1 << keymap.mod_get_index("Control");
+        handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
+        ctx.host_keyboard_extension_id = Some(HostId(99));
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.last_sender_id = 5;
+        let action = handler.on_key(&mut ctx, 1, 0, wl_key_a, WL_KEY_PRESSED);
+        assert_eq!(action, Action::Drop);
+        assert!(handler.dropped_keys.contains(&wl_key_a));
+
+        // Reload keymap: dropped_keys must be cleared.
+        load_test_keymap(&mut handler, &mut ctx);
+        assert!(
+            handler.dropped_keys.is_empty(),
+            "dropped_keys must be cleared on keymap reload to prevent stuck keys after layout change"
+        );
     }
 }
