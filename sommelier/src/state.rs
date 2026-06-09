@@ -109,20 +109,10 @@ impl ShadowTable {
     pub fn allocate_host_id(&mut self) -> u32 {
         loop {
             let id = self.next_host_id;
-            self.next_host_id = self.next_host_id.wrapping_add(1);
-            // After wrapping through u32::MAX→0, skip the reserved IDs.
-            // We check `next_host_id` (not `id`) so that u32::MAX itself
-            // is skipped on the *next* iteration rather than being returned.
-            if self.next_host_id < 2 {
-                self.next_host_id = 2; // Prevent 0 (null) and 1 (wl_display)
-            }
-            // Guard id itself: 0 and 1 are reserved and must never be returned
-            // (id could be 0 or 1 on the very first iteration after a wrap if
-            // next_host_id was adjusted *after* the read above).
-            if id < 2 {
-                continue;
-            }
-            if !self.host_to_guest.contains_key(&id) {
+            // Advance and skip the Wayland-reserved IDs 0 (null) and 1 (wl_display).
+            // wrapping_add(1).max(2) handles the u32::MAX → 0 → 2 wrap in one step.
+            self.next_host_id = self.next_host_id.wrapping_add(1).max(2);
+            if id >= 2 && !self.host_to_guest.contains_key(&id) {
                 return id;
             }
         }
@@ -151,6 +141,14 @@ impl ShadowTable {
 
     pub fn track_host_interface(&mut self, host_id: u32, interface: String) {
         self.host_interfaces.insert(host_id, interface);
+    }
+
+    /// Remove a host-side interface registration.
+    ///
+    /// Call this when a host object is destroyed (e.g. `zcr_extended_keyboard_v1.destroy`)
+    /// to prevent stale events for the recycled ID from being dispatched.
+    pub fn remove_host_interface(&mut self, host_id: u32) {
+        self.host_interfaces.remove(&host_id);
     }
 
     pub fn get_interface(&self, guest_id: u32) -> Option<&String> {

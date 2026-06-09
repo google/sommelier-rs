@@ -39,6 +39,15 @@ const WL_KEY_RELEASED: u32 = 0;
 /// `wl_keyboard.keymap` format value for XKB (Wayland spec §wl_keyboard.keymap_format).
 const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 
+/// Opcodes for `zcr_extended_keyboard_v1` requests
+/// (keyboard-extension-unstable-v1.xml, interface `zcr_extended_keyboard_v1`).
+const ZCR_EXTENDED_KEYBOARD_DESTROY: u16 = 0;
+const ZCR_EXTENDED_KEYBOARD_ACK_KEY: u16 = 1;
+
+/// Opcode for `zcr_keyboard_extension_v1.get_extended_keyboard` request
+/// (interface `zcr_keyboard_extension_v1`).
+const ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD: u16 = 0;
+
 /// A read-only view of a shared-memory fd mapped into the process address space.
 ///
 /// All `unsafe` for the mmap/munmap pair is confined here:
@@ -94,16 +103,19 @@ pub struct KeyboardHandler {
     dropped_keys: std::collections::HashSet<u32>,
 }
 
-// xkb::Context, Keymap, and State are not Send, but we only access them from
-// the single-threaded client task. The tokio runtime requires Send for
-// task-spawned futures, so we provide the guarantee manually.
+// # Safety
+//
+// `xkb::Context`, `Keymap`, and `State` are not `Send`, but `KeyboardHandler`
+// is only ever accessed from the single Tokio task that owns the `Client`.
+// The Tokio runtime requires `Send` for task-spawned futures; we satisfy that
+// requirement manually and guarantee exclusive single-thread access ourselves.
 //
 // NOTE: `MmapView` is NOT a field of `KeyboardHandler`; it is only used as a
 // stack-local inside `on_keymap` and is dropped before returning. Adding an
 // `MmapView` field in the future would violate this Send impl (raw pointer,
 // not Send) and must be re-evaluated at that point.
 //
-// NOTE: Sync is intentionally NOT implemented — xkb::State must never be
+// NOTE: `Sync` is intentionally NOT implemented — `xkb::State` must never be
 // accessed concurrently from multiple threads.
 unsafe impl Send for KeyboardHandler {}
 
@@ -137,6 +149,15 @@ impl KeyboardHandler {
     /// that the compiler can verify at the callsite that no intermediate heap
     /// allocation is introduced.
     fn build_wayland_msg(sender_id: u32, opcode: u16, payload: &[u8]) -> SmallVec<[u8; 32]> {
+        // Wayland wire format: total message length is encoded in 16 bits.
+        // All internal keyboard extension messages are ≤ 16 bytes, so this
+        // assertion should never fire in practice — it guards against future
+        // callers accidentally passing large payloads.
+        debug_assert!(
+            payload.len() + 8 <= 0xFFFF,
+            "Wayland message payload too large for wire format ({} bytes)",
+            payload.len()
+        );
         let total_len = (payload.len() + 8) as u32;
         let mut msg: SmallVec<[u8; 32]> = SmallVec::new();
         msg.extend_from_slice(&sender_id.to_ne_bytes());
@@ -186,14 +207,18 @@ impl KeyboardHandler {
                     .track_host_interface(host_extended_id.0, "zcr_extended_keyboard_v1".to_string());
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
-                // opcode 0, payload = [new_id(4)][keyboard(4)] = 8 bytes inline.
+                // payload = [new_id(4)][keyboard(4)] = 8 bytes inline.
                 let payload = {
                     let mut buf = [0u8; 8];
                     buf[0..4].copy_from_slice(&host_extended_id.0.to_ne_bytes());
                     buf[4..8].copy_from_slice(&host_keyboard_id.0.to_ne_bytes());
                     buf
                 };
-                let msg = Self::build_wayland_msg(extension_host_id.0, 0, &payload);
+                let msg = Self::build_wayland_msg(
+                    extension_host_id.0,
+                    ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD,
+                    &payload,
+                );
                 ctx.client_to_host_queue.push((msg.into(), Vec::new()));
                 log::debug!(
                     "Bound extended keyboard: host_extended_id={} for host_keyboard_id={}",
@@ -226,7 +251,7 @@ impl KeyboardHandler {
             );
             return;
         };
-        // zcr_extended_keyboard_v1.ack_key — opcode 1, payload = [serial(4)][handled(4)].
+        // zcr_extended_keyboard_v1.ack_key — payload = [serial(4)][handled(4)].
         // Build the 8-byte payload as a stack array: zero intermediate allocations.
         // SmallVec<[u8;32]> stores the full 16-byte message inline, so the
         // push to client_to_host_queue is also allocation-free.
@@ -236,7 +261,7 @@ impl KeyboardHandler {
             buf[4..8].copy_from_slice(&(if handled { 1u32 } else { 0u32 }).to_ne_bytes());
             buf
         };
-        let msg = Self::build_wayland_msg(host_extended_id.0, 1, &payload);
+        let msg = Self::build_wayland_msg(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_ACK_KEY, &payload);
         ctx.client_to_host_queue.push((msg.into(), Vec::new()));
     }
 }
@@ -441,16 +466,20 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
             self.modifiers = 0;
             let components = xkb::STATE_MODS_DEPRESSED | xkb::STATE_MODS_LATCHED;
-            if state.mod_name_is_active("Control", components) {
+            // Use the xkbcommon logical modifier name constants (e.g. MOD_NAME_ALT = "Mod1")
+            // rather than raw X11 modifier group strings. These are the stable canonical names
+            // that match across different keyboard layouts, matching C sommelier's use of
+            // XKB_MOD_NAME_ALT, XKB_MOD_NAME_LOGO, etc.
+            if state.mod_name_is_active(xkb::MOD_NAME_CTRL, components) {
                 self.modifiers |= crate::accelerator::CONTROL_MASK;
             }
-            if state.mod_name_is_active("Mod1", components) {
+            if state.mod_name_is_active(xkb::MOD_NAME_ALT, components) {
                 self.modifiers |= crate::accelerator::ALT_MASK;
             }
-            if state.mod_name_is_active("Shift", components) {
+            if state.mod_name_is_active(xkb::MOD_NAME_SHIFT, components) {
                 self.modifiers |= crate::accelerator::SHIFT_MASK;
             }
-            if state.mod_name_is_active("Mod4", components) {
+            if state.mod_name_is_active(xkb::MOD_NAME_LOGO, components) {
                 self.modifiers |= crate::accelerator::SUPER_MASK;
             }
         }
@@ -474,9 +503,12 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // doesn't suppress releases for keys from its previous session.
         self.dropped_keys.clear();
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
-            // zcr_extended_keyboard_v1.destroy — opcode 0, no payload (8-byte header only).
-            let msg = Self::build_wayland_msg(host_extended_id.0, 0, &[]);
+            // zcr_extended_keyboard_v1.destroy — no payload (8-byte header only).
+            let msg = Self::build_wayland_msg(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_DESTROY, &[]);
             ctx.client_to_host_queue.push((msg.into(), Vec::new()));
+            // Unregister from the host dispatch table so stale peek_key events
+            // (version ≥ 2) sent after destroy cannot be dispatched to a dead object.
+            ctx.shadow_table.remove_host_interface(host_extended_id.0);
             log::debug!(
                 "Destroyed extended keyboard: host_extended_id={} for host_keyboard_id={}",
                 host_extended_id.0,
@@ -567,9 +599,10 @@ mod tests {
 
         // Set up extended keyboard tracking so ack_key is sent.
         // host_keyboard_extension_id must be Some to enable the protocol path.
+        // Use non-reserved IDs (not 0 or 1, which are null/wl_display).
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
-        ctx.last_sender_id = 0;
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.last_sender_id = 5;
 
         // Ctrl+A should be dropped (host accelerator)
         ctx.client_to_host_queue.clear();
@@ -601,8 +634,8 @@ mod tests {
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
-        ctx.last_sender_id = 0;
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.last_sender_id = 5;
 
         // Ctrl+B is NOT in accelerators → forward to guest
         ctx.client_to_host_queue.clear();
@@ -632,8 +665,8 @@ mod tests {
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
-        ctx.last_sender_id = 0;
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.last_sender_id = 5;
 
         // Press → Drop
         let action = handler.on_key(&mut ctx, 1, 0, wl_key_a, 1);
@@ -648,15 +681,16 @@ mod tests {
         assert_eq!(action, Action::Drop);
     }
 
-    /// Regression test: on_keymap must use mmap (not read/pread) because:
-    /// 1. The host sends keymap data via shared memory (memfd). mmap works.
-    /// 2. read() would consume data, preventing the fd from being forwarded.
-    /// 3. pread()/read_at() fails with ESPIPE on non-seekable fds.
-    /// 4. Even on seekable fds, the cursor may be at EOF after the host wrote.
+    /// Regression test: on_keymap must use mmap rather than read/seek because:
+    /// 1. The host sends keymap data via shared memory (memfd); mmap reads from
+    ///    offset 0 regardless of the fd cursor position.
+    /// 2. read() would advance the fd offset, preventing the fd from being
+    ///    forwarded with its original data intact.
+    /// 3. On non-seekable fds the cursor cannot be reset to 0 at all.
     ///
     /// This test creates a memfd, writes the keymap, and does NOT seek back
-    /// to the start — simulating a host that wrote then sent the fd. The
-    /// on_keymap implementation must handle this via mmap (offset 0).
+    /// to the start — simulating a host that wrote and then sent the fd.
+    /// The on_keymap implementation must still load the keymap via mmap.
     #[test]
     fn keymap_loads_from_non_rewound_memfd() {
         let mut handler = KeyboardHandler::new();
