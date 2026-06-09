@@ -387,6 +387,10 @@ impl Client {
             && conn.send(&reverse_out_buf, &reverse_out_fds).await.is_err()
         {
             success = false;
+            // Do NOT return early here: we must still close `reverse_out_fds`
+            // below. sendmsg(SCM_RIGHTS) copies FDs into the kernel cmsg buffer;
+            // if the send fails the originals remain our responsibility and
+            // must be closed to avoid fd leaks.
         }
         // Close FDs regardless of send success — we own them and must not leak,
         // even when the send fails. sendmsg(SCM_RIGHTS) duplicates FDs into the

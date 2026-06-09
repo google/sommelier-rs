@@ -134,7 +134,9 @@ pub struct KeyboardHandler {
 //      shared reference (`&KeyboardHandler`) can be sent across threads.
 //
 // *** AUDIT REQUIRED if any of the following changes: ***
-//   - The Tokio executor type (e.g., adding current_thread runtime)
+//   - The Tokio executor type (e.g., switching to a multi_thread runtime that
+//     could migrate tasks between OS threads; current_thread is safe because
+//     there is only one thread to migrate to)
 //   - The handler lifecycle (e.g., storing it in an Arc)
 //   - The field list of KeyboardHandler (e.g., adding a raw pointer)
 unsafe impl Send for KeyboardHandler {}
@@ -307,10 +309,12 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         match std::str::from_utf8(&slice[..len]) {
             Err(e) => {
                 log::error!("on_keymap: keymap bytes are not valid UTF-8: {}", e);
-                // Clear XKB state and drop state together: they must remain
-                // consistent. Leaving state populated while dropped_keys is
-                // cleared (or vice-versa) could cause stuck keys or wrong
-                // accelerator decisions on the next key event.
+                // Clear keymap, state, and drop set together: all three must
+                // remain mutually consistent. Leaving `keymap` set while `state`
+                // is None creates a split where future code reading `keymap`
+                // operates on stale data with no active XKB state to validate
+                // against.
+                self.keymap = None;
                 self.state = None;
                 self.dropped_keys.clear();
             }
@@ -322,8 +326,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             ) {
                 None => {
                     log::error!("on_keymap: xkbcommon failed to compile the keymap string");
-                    // Clear XKB state and drop state together for the same
-                    // consistency reason as the UTF-8 error case above.
+                    // Clear keymap, state, and drop set together for the same
+                    // consistency reason as the UTF-8 error case above: all
+                    // three must remain in sync.
+                    self.keymap = None;
                     self.state = None;
                     self.dropped_keys.clear();
                 }
@@ -438,9 +444,11 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                     self.dropped_keys.insert(key);
                 }
                 // Send ack_key only for press events, matching the C sommelier
-                // reference implementation. Exo only queues presses in
-                // pending_key_acks_; sending acks for releases would be a no-op
-                // against non-existent serials but is deliberately avoided for clarity.
+                // reference implementation. Exo places only press events into
+                // pending_key_acks_ and never expects an ack for a release;
+                // a release ack would target a non-existent serial and be
+                // silently ignored — but we avoid sending it for clarity and
+                // to match the C reference exactly.
                 Self::send_ack_key(ctx, host_keyboard_id, serial, handled);
             }
             WL_KEY_RELEASED => {
@@ -547,13 +555,32 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
 /// `zcr_keyboard_extension_v1` handler — sommelier only sends requests to this
 /// interface (i.e. `get_extended_keyboard`); the host never sends events back to
-/// the factory object, so all event callbacks are empty.
+/// the factory object, so all event callbacks are empty stubs.
 impl crate::protocols::keyboard_extension_unstable_v1::zcr_keyboard_extension_v1::ZcrKeyboardExtensionV1Handler for KeyboardHandler {}
 
 /// `zcr_extended_keyboard_v1` handler — sommelier only sends requests to this
-/// interface (i.e. `ack_key`, `destroy`); no host events are expected in the
-/// v1 protocol (peek_key is a v2 addition and is explicitly not requested).
-impl crate::protocols::keyboard_extension_unstable_v1::zcr_extended_keyboard_v1::ZcrExtendedKeyboardV1Handler for KeyboardHandler {}
+/// interface (i.e. `ack_key`, `destroy`). The v1 protocol has no host events.
+///
+/// `on_peek_key` is a v2 addition; it is not requested here but is stubbed
+/// with a `log::warn!` so that a v2 compositor is immediately visible in logs
+/// rather than silently discarded, making future version upgrades easier to detect.
+impl crate::protocols::keyboard_extension_unstable_v1::zcr_extended_keyboard_v1::ZcrExtendedKeyboardV1Handler for KeyboardHandler {
+    fn on_peek_key(
+        &mut self,
+        _ctx: &mut crate::state::Context,
+        _serial: u32,
+        _time: u32,
+        _key: u32,
+        _state: u32,
+    ) -> crate::wire::Action {
+        log::warn!(
+            "zcr_extended_keyboard_v1: received peek_key (v2 event); \
+             sommelier is bound at v1 and does not handle peek_key. \
+             Consider upgrading to v2 if the host compositor requires it."
+        );
+        crate::wire::Action::Forward
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -595,6 +622,10 @@ mod tests {
 
     /// Find the evdev keycode for a given keysym in the keymap.
     ///
+    /// Returns `None` if the keysym is not present. Call sites should use
+    /// `.expect("<description>")` so that test-failure output names the keysym
+    /// that was missing rather than showing a bare panic from inside this helper.
+    ///
     /// # Note on shift-level lookup
     /// This helper uses `key_get_syms_by_level(..., level=0)` which returns the
     /// **unshifted** (base level) symbol for each key. This is intentional for
@@ -603,7 +634,7 @@ mod tests {
     /// such tests would need a different lookup strategy. The production code uses
     /// `key_get_one_sym` which correctly accounts for the active shift level at
     /// runtime.
-    fn find_keycode(keymap: &xkb::Keymap, target: u32) -> u32 {
+    fn find_keycode(keymap: &xkb::Keymap, target: u32) -> Option<u32> {
         let min = keymap.min_keycode().raw();
         let max = keymap.max_keycode().raw();
         for k in min..=max {
@@ -611,20 +642,24 @@ mod tests {
             if syms.iter().any(|s| s.raw() == target) {
                 // XKB keycodes = evdev keycode + 8 (XKB_KEYCODE_OFFSET in xkbcommon.h).
                 // Wayland wl_keyboard.key uses evdev keycodes, so subtract 8.
-                return k - 8;
+                return Some(k - 8);
             }
         }
-        panic!("keysym {:#x} not found in keymap", target);
+        None
     }
 
     #[test]
     fn accelerator_keys_are_dropped_and_acked_not_handled() {
         let mut handler = KeyboardHandler::new();
-        let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        let mut ctx = Context::new_for_test(
+            false,
+            false,
+            crate::accelerator::parse_accelerators("<Control>a").unwrap(),
+        );
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
-        let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
+        let wl_key_a =
+            find_keycode(&keymap, xkb::keysyms::KEY_a).expect("KEY_a not found in keymap");
 
         // Press Ctrl
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
@@ -656,11 +691,15 @@ mod tests {
     #[test]
     fn non_accelerator_keys_are_forwarded_and_acked_handled() {
         let mut handler = KeyboardHandler::new();
-        let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        let mut ctx = Context::new_for_test(
+            false,
+            false,
+            crate::accelerator::parse_accelerators("<Control>a").unwrap(),
+        );
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
-        let wl_key_b = find_keycode(&keymap, xkb::keysyms::KEY_b);
+        let wl_key_b =
+            find_keycode(&keymap, xkb::keysyms::KEY_b).expect("KEY_b not found in keymap");
 
         // Press Ctrl
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
@@ -688,11 +727,15 @@ mod tests {
     #[test]
     fn dropped_key_release_is_also_dropped() {
         let mut handler = KeyboardHandler::new();
-        let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        let mut ctx = Context::new_for_test(
+            false,
+            false,
+            crate::accelerator::parse_accelerators("<Control>a").unwrap(),
+        );
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
-        let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
+        let wl_key_a =
+            find_keycode(&keymap, xkb::keysyms::KEY_a).expect("KEY_a not found in keymap");
 
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
@@ -943,11 +986,15 @@ mod tests {
     #[test]
     fn dropped_keys_cleared_on_release() {
         let mut handler = KeyboardHandler::new();
-        let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        let mut ctx = Context::new_for_test(
+            false,
+            false,
+            crate::accelerator::parse_accelerators("<Control>a").unwrap(),
+        );
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
-        let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
+        let wl_key_a =
+            find_keycode(&keymap, xkb::keysyms::KEY_a).expect("KEY_a not found in keymap");
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
         ctx.keyboard_to_extended_keyboard.insert(HostId(10), HostId(50));
@@ -1044,11 +1091,15 @@ mod tests {
     #[test]
     fn dropped_keys_cleared_on_keymap_reload() {
         let mut handler = KeyboardHandler::new();
-        let mut ctx = Context::new(false, false);
-        ctx.accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        let mut ctx = Context::new_for_test(
+            false,
+            false,
+            crate::accelerator::parse_accelerators("<Control>a").unwrap(),
+        );
 
         let keymap = load_test_keymap(&mut handler, &mut ctx);
-        let wl_key_a = find_keycode(&keymap, xkb::keysyms::KEY_a);
+        let wl_key_a =
+            find_keycode(&keymap, xkb::keysyms::KEY_a).expect("KEY_a not found in keymap");
 
         // Simulate dropping a key (press of Ctrl+A)
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
