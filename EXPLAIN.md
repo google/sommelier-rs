@@ -37,9 +37,16 @@ Physical key → Exo stores key in pending_key_acks_ (1s timeout)
 
 **This is the only real mechanism for controlling accelerator behavior in Exo.**
 
-The `zwp_keyboard_shortcuts_inhibit_manager_v1` standard Wayland protocol exists
-but is effectively a **no-op** in Exo — it sets a flag on the surface that is
-never consulted in the accelerator dispatch path.
+### The `zwp_keyboard_shortcuts_inhibit_manager_v1` Standard Protocol
+
+The standard Wayland protocol `zwp_keyboard_shortcuts_inhibit_manager_v1` (defined in `keyboard-shortcuts-inhibit-unstable-v1.xml`) provides:
+1. `zwp_keyboard_shortcuts_inhibit_manager_v1.inhibit_shortcuts(id, surface, seat)`: Creates a shortcut inhibitor for a seat/surface.
+2. `zwp_keyboard_shortcuts_inhibitor_v1`: Emits `active` and `inactive` events indicating whether the compositor is currently inhibiting shortcuts for the focus surface.
+
+While standard Wayland compositors use this protocol to toggle shortcut processing, in ChromeOS Exo it is effectively a **no-op**. Under the hood in Exo (`components/exo/wayland/zwp_keyboard_shortcuts_inhibit_manager.cc`), binding this manager merely sets a status flag on the client's `wl_surface`, but Exo's accelerator dispatch system does *not* consult this flag when deciding whether to intercept keystrokes like `Ctrl+Space` or `Alt+BracketLeft`.
+
+To keep our pull request clean, concise, and focused on actual functioning code, we removed the implementation of `zwp_keyboard_shortcuts_inhibit_manager_v1` entirely from Sommelier. This avoids maintaining a write-only `shortcut_inhibitors` tracking map and generating unnecessary protocol boilerplate for a feature that has no impact on accelerator behavior in the host.
+
 
 ### What was wrong in the upstream `virtwl` branch
 
