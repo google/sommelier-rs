@@ -144,15 +144,7 @@ impl KeyboardHandler {
             _not_sync: std::marker::PhantomData,
         }
     }
-}
 
-impl Default for KeyboardHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl KeyboardHandler {
     /// Check if the pressed key matches any configured host accelerators.
     fn is_host_accelerator(&self, accelerators: &[crate::accelerator::Accelerator], key: u32) -> bool {
         let Some(state) = &self.state else { return false; };
@@ -264,6 +256,12 @@ impl KeyboardHandler {
     }
 }
 
+impl Default for KeyboardHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     /// Parse the keymap to set up XKB state for keysym resolution.
     /// The host sends keymap data via a shared-memory fd (e.g. memfd).
@@ -287,6 +285,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             return Action::Forward;
         }
 
+        // size is a u32 from the Wayland wire; the cast to usize is lossless on
+        // 64-bit Linux (the only supported target for sommelier).
         let Some(mapping) = MmapView::from_fd(fd, size as usize) else {
             log::error!("on_keymap: mmap failed for fd={}, size={}", fd, size);
             return Action::Forward;
@@ -365,13 +365,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         // Send zwp_text_input_v3.enter (opcode 0)
                         let mut builder = MessageBuilder::new();
                         builder.write_u32(guest_surface_id);
-
-                        let mut msg = Vec::new();
-                        msg.extend_from_slice(&guest_text_input_id.to_ne_bytes());
-                        let len = (builder.payload.len() + 8) as u32;
-                        let word2 = len << 16;
-                        msg.extend_from_slice(&word2.to_ne_bytes());
-                        msg.extend_from_slice(&builder.payload);
+                        let msg = builder.build_message(*guest_text_input_id, 0);
                         ctx.host_to_client_queue.push((msg, Vec::new()));
                     }
                 }
@@ -399,13 +393,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         // Send zwp_text_input_v3.leave (opcode 1)
                         let mut builder = MessageBuilder::new();
                         builder.write_u32(guest_surface_id);
-
-                        let mut msg = Vec::new();
-                        msg.extend_from_slice(&guest_text_input_id.to_ne_bytes());
-                        let len = (builder.payload.len() + 8) as u32;
-                        let word2 = (len << 16) | 1u32;
-                        msg.extend_from_slice(&word2.to_ne_bytes());
-                        msg.extend_from_slice(&builder.payload);
+                        let msg = builder.build_message(*guest_text_input_id, 1);
                         ctx.host_to_client_queue.push((msg, Vec::new()));
                     }
                 }

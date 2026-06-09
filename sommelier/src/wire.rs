@@ -222,7 +222,12 @@ impl Default for MessageBuilder {
 }
 
 impl MessageBuilder {
-    /// Assemble a complete Wayland wire message into a `Vec<u8>`.
+    /// Assemble a complete Wayland wire message into a `Vec<u8>`, consuming `self`.
+    ///
+    /// `build_message` is the **terminal call** on a `MessageBuilder`. After calling
+    /// it the builder is consumed and cannot be reused. This is intentional: it
+    /// prevents accidentally building two messages from the same payload buffer,
+    /// which would silently duplicate wire data.
     ///
     /// Wire layout per the Wayland specification §4.3 (Wire Format):
     ///   - Word 0 (bytes 0–3): `sender_id` (u32, native-endian)

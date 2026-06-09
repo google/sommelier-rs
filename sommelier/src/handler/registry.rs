@@ -63,12 +63,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
                 .get_guest_id(ctx.last_sender_id)
                 .unwrap_or(ctx.last_sender_id);
 
-            let mut global_msg = Vec::new();
-            global_msg.extend_from_slice(&registry_guest_id.to_ne_bytes());
-            let len = (global_builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::EVT_GLOBAL as u32);
-            global_msg.extend_from_slice(&word2.to_ne_bytes());
-            global_msg.extend_from_slice(&global_builder.payload);
+            let global_msg = global_builder.build_message(registry_guest_id, wl_registry::EVT_GLOBAL as u16);
             ctx.host_to_client_queue.push((global_msg, Vec::new()));
 
             // 2. Bind internally
@@ -79,13 +74,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             builder.write_u32(client_version);
             builder.write_u32(host_id); // new_id
 
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
+            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             // Drop the original global event so we don't send the v4 advertisement
@@ -108,12 +97,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
                 .get_guest_id(ctx.last_sender_id)
                 .unwrap_or(ctx.last_sender_id);
 
-            let mut global_msg = Vec::new();
-            global_msg.extend_from_slice(&registry_guest_id.to_ne_bytes());
-            let len = (global_builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::EVT_GLOBAL as u32);
-            global_msg.extend_from_slice(&word2.to_ne_bytes());
-            global_msg.extend_from_slice(&global_builder.payload);
+            let global_msg = global_builder.build_message(registry_guest_id, wl_registry::EVT_GLOBAL as u16);
             ctx.host_to_client_queue.push((global_msg, Vec::new()));
 
             // 2. Bind internally
@@ -124,13 +108,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             builder.write_u32(version);
             builder.write_u32(host_id); // new_id
 
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
+            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             return Action::Drop;
@@ -148,13 +126,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             builder.write_u32(version);
             builder.write_u32(host_id); // new_id
 
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
+            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             return Action::Drop;
@@ -176,13 +148,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             builder.write_u32(1);
             builder.write_u32(host_id);
 
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
+            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
             log::debug!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
 
@@ -202,13 +168,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             builder.write_u32(1); // Bind version 1
             builder.write_u32(host_id); // new_id
 
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
+            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
         }
 
@@ -241,16 +201,8 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             for format in [0u32, 1u32] {
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(format);
-
-                let mut full_msg = Vec::new();
-                full_msg.extend_from_slice(&guest_new_id.to_ne_bytes());
-                let len = (builder.payload.len() + 8) as u32;
-                let word2 = (len << 16) | (wl_shm::EVT_FORMAT as u32);
-                full_msg.extend_from_slice(&word2.to_ne_bytes());
-                full_msg.extend_from_slice(&builder.payload);
-
-                // Send to client
-                ctx.host_to_client_queue.push((full_msg, Vec::new()));
+                let msg = builder.build_message(*guest_new_id, wl_shm::EVT_FORMAT as u16);
+                ctx.host_to_client_queue.push((msg, Vec::new()));
             }
 
             return Action::Drop;
@@ -283,13 +235,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             builder.write_u32(*_version);
             builder.write_u32(host_new_id);
 
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
+            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
         } else {
             error!("Registry not mapped! Guest ID: {}", registry_guest_id);

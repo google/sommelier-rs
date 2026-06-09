@@ -40,12 +40,6 @@ impl GuestId {
     pub(crate) fn from_request_sender(ctx: &Context) -> Self {
         Self(ctx.last_sender_id)
     }
-
-    /// Extract the raw u32 value (e.g. for wire serialization).
-    #[inline]
-    pub fn raw(self) -> u32 {
-        self.0
-    }
 }
 
 /// A Wayland object ID allocated by the **host** compositor side.
@@ -75,12 +69,6 @@ impl HostId {
     #[inline]
     pub(crate) fn from_allocated(id: u32) -> Self {
         Self(id)
-    }
-
-    /// Extract the raw u32 value (e.g. for wire serialization).
-    #[inline]
-    pub fn raw(self) -> u32 {
-        self.0
     }
 }
 
@@ -442,17 +430,16 @@ mod tests {
 
     #[test]
     fn guest_id_and_host_id_raw_round_trip() {
-        // Verify the typed constructors and raw() round-trip through the same u32.
+        // Verify the typed constructors round-trip through the same inner u32.
         let ctx = Context::new(false, false);
-        // GuestId::from_request_sender reads ctx.last_sender_id.
         let mut ctx = ctx;
         ctx.last_sender_id = 42;
         let gid = GuestId::from_request_sender(&ctx);
-        assert_eq!(gid.raw(), 42);
+        assert_eq!(gid.0, 42);
 
         ctx.last_sender_id = 99;
         let hid = HostId::from_event_sender(&ctx);
-        assert_eq!(hid.raw(), 99);
+        assert_eq!(hid.0, 99);
     }
 }
 

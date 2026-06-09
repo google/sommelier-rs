@@ -388,6 +388,9 @@ impl Client {
         {
             success = false;
         }
+        // ack_key messages carry no FDs, so reverse_out_fds is normally empty
+        // and this extend is a no-op. It is included for correctness in case the
+        // reverse queue ever carries FDs (e.g. if a future protocol extension adds them).
         fds_to_close.extend(reverse_out_fds.iter());
 
         fds_to_close.extend(conn.read_fds.iter().take(fd_offset));
