@@ -75,53 +75,40 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             return Action::Forward;
         }
 
-        use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
-        use std::num::NonZeroUsize;
-        use std::os::unix::io::BorrowedFd;
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
+        use std::mem::ManuallyDrop;
+        use std::os::unix::io::FromRawFd;
 
-        let Some(nonzero_size) = NonZeroUsize::new(size as usize) else {
-            return Action::Forward;
-        };
+        // Wrap the raw fd safely without taking ownership or closing it.
+        let mut file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+        let _ = file.seek(SeekFrom::Start(0));
 
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-        let Ok(ptr) = (unsafe {
-            mmap(
-                None,
-                nonzero_size,
-                ProtFlags::PROT_READ,
-                MapFlags::MAP_SHARED,
-                borrowed_fd,
-                0,
-            )
-        }) else {
-            return Action::Forward;
-        };
+        let mut buf = vec![0u8; size as usize];
+        if let Ok(bytes_read) = file.read(&mut buf) {
+            if bytes_read > 0 {
+                // Strip the trailing null terminator if present.
+                let len = if buf[bytes_read - 1] == 0 {
+                    bytes_read - 1
+                } else {
+                    bytes_read
+                };
 
-        let slice = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, size as usize) };
-
-        // Strip the trailing null terminator if present.
-        let len = if size > 0 && slice[size as usize - 1] == 0 {
-            size as usize - 1
-        } else {
-            size as usize
-        };
-
-        if let Ok(s) = std::str::from_utf8(&slice[..len]) {
-            if let Some(keymap) = xkb::Keymap::new_from_string(
-                &self.context,
-                s.to_string(),
-                xkb::KEYMAP_FORMAT_TEXT_V1,
-                xkb::KEYMAP_COMPILE_NO_FLAGS,
-            ) {
-                self.state = Some(xkb::State::new(&keymap));
-                self.keymap = Some(keymap);
-                log::debug!("XKB keymap loaded successfully");
+                if let Ok(s) = std::str::from_utf8(&buf[..len]) {
+                    if let Some(keymap) = xkb::Keymap::new_from_string(
+                        &self.context,
+                        s.to_string(),
+                        xkb::KEYMAP_FORMAT_TEXT_V1,
+                        xkb::KEYMAP_COMPILE_NO_FLAGS,
+                    ) {
+                        self.state = Some(xkb::State::new(&keymap));
+                        self.keymap = Some(keymap);
+                        log::debug!("XKB keymap loaded successfully");
+                    }
+                }
             }
         }
 
-        unsafe {
-            let _ = munmap(ptr, size as usize);
-        }
         Action::Forward
     }
 
