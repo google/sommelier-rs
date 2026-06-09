@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock};
 use crate::allocator::Allocator;
 use crate::virtwl_channel::VirtWaylandChannel;
 use log::warn;
+use smallvec::SmallVec;
 
 /// A Wayland object ID allocated by the **guest** (client) side.
 ///
@@ -316,8 +317,15 @@ pub struct Context {
     pub keyboard_to_seat: HashMap<u32, u32>,
     pub active_surface_for_seat: HashMap<u32, u32>,
     pub last_sender_id: u32,
-    pub client_to_host_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
-    pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
+    /// Pending messages to send from client→host (e.g. ack_key, bind requests).
+    ///
+    /// `SmallVec<[u8; 32]>` stores messages ≤ 32 bytes inline (all three
+    /// keyboard extension messages are ≤ 16 bytes), so the hot-path
+    /// `send_ack_key` call incurs **zero heap allocations** for the message
+    /// buffer. Larger messages (registry bind, text-input, etc.) fall back
+    /// to heap automatically, matching the previous `Vec<u8>` behaviour.
+    pub client_to_host_queue: Vec<(SmallVec<[u8; 32]>, Vec<RawFd>)>,
+    pub host_to_client_queue: Vec<(SmallVec<[u8; 32]>, Vec<RawFd>)>,
     pub allocator: Option<Allocator>,
     pub virtwayland_channel: Option<Arc<VirtWaylandChannel>>,
     pub host_dmabuf_id: Option<u32>,

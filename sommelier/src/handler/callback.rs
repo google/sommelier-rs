@@ -43,7 +43,7 @@ impl WlCallbackHandler for CallbackHandler {
             let word2 = (len << 16) | (protocols::wayland::wl_callback::EVT_DONE as u32);
             done_msg.extend_from_slice(&word2.to_ne_bytes());
             done_msg.extend_from_slice(&builder.payload);
-            ctx.host_to_client_queue.push((done_msg, Vec::new()));
+            ctx.host_to_client_queue.push((done_msg.into(), Vec::new()));
 
             // 2. Send delete_id to client
             let mut builder2 = MessageBuilder::new();
@@ -55,7 +55,7 @@ impl WlCallbackHandler for CallbackHandler {
             let word2 = (len << 16) | (protocols::wayland::wl_display::EVT_DELETE_ID as u32);
             del_msg.extend_from_slice(&word2.to_ne_bytes());
             del_msg.extend_from_slice(&builder2.payload);
-            ctx.host_to_client_queue.push((del_msg, Vec::new()));
+            ctx.host_to_client_queue.push((del_msg.into(), Vec::new()));
 
             // 3. Remove from shadow table
             ctx.shadow_table.remove_id(guest_id);

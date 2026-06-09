@@ -64,7 +64,7 @@ impl LinuxDmabufHandler {
                 full_msg.extend_from_slice(&word2.to_ne_bytes());
                 full_msg.extend_from_slice(&builder.payload);
 
-                ctx.client_to_host_queue.push((full_msg, vec![p.fd]));
+                ctx.client_to_host_queue.push((full_msg.into(), vec![p.fd]));
             }
 
             // Send CREATE
@@ -166,7 +166,7 @@ impl zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1Handler for LinuxDmab
         full_msg.extend_from_slice(&word2.to_ne_bytes());
         full_msg.extend_from_slice(&builder.payload);
 
-        ctx.host_to_client_queue.push((full_msg, Vec::new()));
+        ctx.host_to_client_queue.push((full_msg.into(), Vec::new()));
         Action::Drop
     }
 
@@ -189,7 +189,7 @@ impl zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1Handler for LinuxDmab
         full_msg.extend_from_slice(&word2.to_ne_bytes());
         full_msg.extend_from_slice(&builder.payload);
 
-        ctx.host_to_client_queue.push((full_msg, Vec::new()));
+        ctx.host_to_client_queue.push((full_msg.into(), Vec::new()));
         Action::Drop
     }
 
@@ -302,7 +302,7 @@ impl zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1Handler for LinuxDmab
         full_msg.extend_from_slice(&word2.to_ne_bytes());
         full_msg.extend_from_slice(&builder.payload);
 
-        ctx.host_to_client_queue.push((full_msg, vec![new_fd]));
+        ctx.host_to_client_queue.push((full_msg.into(), vec![new_fd]));
 
         Action::Drop
     }
@@ -336,7 +336,7 @@ impl zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1Handler for LinuxDmab
         full_msg.extend_from_slice(&word2.to_ne_bytes());
         full_msg.extend_from_slice(&builder.payload);
 
-        ctx.host_to_client_queue.push((full_msg, Vec::new()));
+        ctx.host_to_client_queue.push((full_msg.into(), Vec::new()));
 
         Action::Drop
     }
@@ -436,7 +436,7 @@ impl zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1Handler for LinuxDmabufHa
                 full_msg.extend_from_slice(&word2.to_ne_bytes());
                 full_msg.extend_from_slice(&builder.payload);
 
-                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
             },
         );
         Action::Drop
@@ -480,7 +480,7 @@ impl zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1Handler for LinuxDmabufHa
                 full_msg.extend_from_slice(&word2.to_ne_bytes());
                 full_msg.extend_from_slice(&builder.payload);
 
-                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
             },
         );
         Action::Drop

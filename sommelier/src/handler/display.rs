@@ -39,7 +39,7 @@ impl wl_display::WlDisplayHandler for DisplayHandler {
         full_msg.extend_from_slice(&word2.to_ne_bytes());
         full_msg.extend_from_slice(&builder.payload);
 
-        ctx.client_to_host_queue.push((full_msg, Vec::new()));
+        ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
 
         Action::Drop
     }
@@ -61,7 +61,7 @@ impl wl_display::WlDisplayHandler for DisplayHandler {
         full_msg.extend_from_slice(&word2.to_ne_bytes());
         full_msg.extend_from_slice(&builder.payload);
 
-        ctx.client_to_host_queue.push((full_msg, Vec::new()));
+        ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
 
         Action::Drop
     }
@@ -82,7 +82,7 @@ impl wl_display::WlDisplayHandler for DisplayHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.host_to_client_queue.push((full_msg, Vec::new()));
+            ctx.host_to_client_queue.push((full_msg.into(), Vec::new()));
         }
         Action::Drop
     }
@@ -112,7 +112,7 @@ impl wl_display::WlDisplayHandler for DisplayHandler {
         full_msg.extend_from_slice(&word2.to_ne_bytes());
         full_msg.extend_from_slice(&builder.payload);
 
-        ctx.host_to_client_queue.push((full_msg, Vec::new()));
+        ctx.host_to_client_queue.push((full_msg.into(), Vec::new()));
 
         Action::Drop
     }

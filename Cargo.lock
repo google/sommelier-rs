@@ -596,6 +596,7 @@ dependencies = [
  "libc",
  "log",
  "nix",
+ "smallvec",
  "tokio",
  "wayland_codegen",
  "xkbcommon",

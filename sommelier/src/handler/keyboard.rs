@@ -29,6 +29,7 @@ limitations under the License.
 use crate::protocols::wayland::wl_keyboard;
 use crate::state::{Context, GuestId, HostId};
 use crate::wire::{Action, MessageBuilder};
+use smallvec::SmallVec;
 use xkbcommon::xkb;
 
 /// `wl_keyboard.key` state values (Wayland spec §wl_keyboard.key).
@@ -125,14 +126,19 @@ impl Default for KeyboardHandler {
 }
 
 impl KeyboardHandler {
-    /// Build a Wayland wire message: `[sender_id(4)][size<<16|opcode(4)][payload...]`.
+    /// Build a Wayland wire message into a `SmallVec<[u8; 32]>`.
     ///
-    /// This is the one place that encodes the Wayland wire framing so that
-    /// callers only need to supply the logical fields. All three internal
-    /// messages (`get_extended_keyboard`, `ack_key`, `destroy`) use this helper.
-    fn build_wayland_msg(sender_id: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
+    /// The message layout is `[sender_id(4)][size<<16|opcode(4)][payload...]`.
+    /// For payloads ≤ 24 bytes (all three keyboard extension messages are ≤ 8
+    /// bytes of payload, 16 bytes total) the returned buffer is stored inline
+    /// on the stack — **zero heap allocations** for the keyboard hot path.
+    ///
+    /// Callers must supply the payload as a `[u8; N]` array (not a `Vec`) so
+    /// that the compiler can verify at the callsite that no intermediate heap
+    /// allocation is introduced.
+    fn build_wayland_msg(sender_id: u32, opcode: u16, payload: &[u8]) -> SmallVec<[u8; 32]> {
         let total_len = (payload.len() + 8) as u32;
-        let mut msg = Vec::with_capacity(8 + payload.len());
+        let mut msg: SmallVec<[u8; 32]> = SmallVec::new();
         msg.extend_from_slice(&sender_id.to_ne_bytes());
         msg.extend_from_slice(&((total_len << 16) | opcode as u32).to_ne_bytes());
         msg.extend_from_slice(payload);
@@ -180,12 +186,15 @@ impl KeyboardHandler {
                     .track_host_interface(host_extended_id.0, "zcr_extended_keyboard_v1".to_string());
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
-                // opcode 0: get_extended_keyboard
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(host_extended_id.0);
-                builder.write_u32(host_keyboard_id.0);
-                let msg = Self::build_wayland_msg(extension_host_id.0, 0, &builder.payload);
-                ctx.client_to_host_queue.push((msg, Vec::new()));
+                // opcode 0, payload = [new_id(4)][keyboard(4)] = 8 bytes inline.
+                let payload = {
+                    let mut buf = [0u8; 8];
+                    buf[0..4].copy_from_slice(&host_extended_id.0.to_ne_bytes());
+                    buf[4..8].copy_from_slice(&host_keyboard_id.0.to_ne_bytes());
+                    buf
+                };
+                let msg = Self::build_wayland_msg(extension_host_id.0, 0, &payload);
+                ctx.client_to_host_queue.push((msg.into(), Vec::new()));
                 log::debug!(
                     "Bound extended keyboard: host_extended_id={} for host_keyboard_id={}",
                     host_extended_id.0,
@@ -217,13 +226,18 @@ impl KeyboardHandler {
             );
             return;
         };
-        let handled_val: u32 = if handled { 1 } else { 0 };
-        let mut builder = MessageBuilder::new();
-        builder.write_u32(serial);
-        builder.write_u32(handled_val);
-        // opcode 1: ack_key
-        let msg = Self::build_wayland_msg(host_extended_id.0, 1, &builder.payload);
-        ctx.client_to_host_queue.push((msg, Vec::new()));
+        // zcr_extended_keyboard_v1.ack_key — opcode 1, payload = [serial(4)][handled(4)].
+        // Build the 8-byte payload as a stack array: zero intermediate allocations.
+        // SmallVec<[u8;32]> stores the full 16-byte message inline, so the
+        // push to client_to_host_queue is also allocation-free.
+        let payload = {
+            let mut buf = [0u8; 8];
+            buf[0..4].copy_from_slice(&serial.to_ne_bytes());
+            buf[4..8].copy_from_slice(&(if handled { 1u32 } else { 0u32 }).to_ne_bytes());
+            buf
+        };
+        let msg = Self::build_wayland_msg(host_extended_id.0, 1, &payload);
+        ctx.client_to_host_queue.push((msg.into(), Vec::new()));
     }
 }
 
@@ -325,7 +339,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         let word2 = len << 16;
                         msg.extend_from_slice(&word2.to_ne_bytes());
                         msg.extend_from_slice(&builder.payload);
-                        ctx.host_to_client_queue.push((msg, Vec::new()));
+                        ctx.host_to_client_queue.push((msg.into(), Vec::new()));
                     }
                 }
             }
@@ -359,7 +373,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         let word2 = (len << 16) | 1u32;
                         msg.extend_from_slice(&word2.to_ne_bytes());
                         msg.extend_from_slice(&builder.payload);
-                        ctx.host_to_client_queue.push((msg, Vec::new()));
+                        ctx.host_to_client_queue.push((msg.into(), Vec::new()));
                     }
                 }
             }
@@ -460,9 +474,9 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // doesn't suppress releases for keys from its previous session.
         self.dropped_keys.clear();
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
-            // zcr_extended_keyboard_v1.destroy — opcode 0, no payload.
+            // zcr_extended_keyboard_v1.destroy — opcode 0, no payload (8-byte header only).
             let msg = Self::build_wayland_msg(host_extended_id.0, 0, &[]);
-            ctx.client_to_host_queue.push((msg, Vec::new()));
+            ctx.client_to_host_queue.push((msg.into(), Vec::new()));
             log::debug!(
                 "Destroyed extended keyboard: host_extended_id={} for host_keyboard_id={}",
                 host_extended_id.0,

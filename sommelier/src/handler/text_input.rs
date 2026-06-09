@@ -49,7 +49,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             let word2 = (len << 16) | 2u32;
             msg.extend_from_slice(&word2.to_ne_bytes());
             msg.extend_from_slice(&builder.payload);
-            ctx.host_to_client_queue.push((msg, Vec::new()));
+            ctx.host_to_client_queue.push((msg.into(), Vec::new()));
         }
         Action::Drop
     }
@@ -69,7 +69,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             let word2 = (len << 16) | 2u32;
             msg.extend_from_slice(&word2.to_ne_bytes());
             msg.extend_from_slice(&builder.payload);
-            ctx.host_to_client_queue.push((msg, Vec::new()));
+            ctx.host_to_client_queue.push((msg.into(), Vec::new()));
 
             // v3 commit_string (opcode 3)
             let mut builder = crate::wire::MessageBuilder::new();
@@ -81,7 +81,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             let word2 = (len << 16) | 3u32;
             msg.extend_from_slice(&word2.to_ne_bytes());
             msg.extend_from_slice(&builder.payload);
-            ctx.host_to_client_queue.push((msg, Vec::new()));
+            ctx.host_to_client_queue.push((msg.into(), Vec::new()));
 
             // v3 done (opcode 5)
             // serial matches state but for simplicity we can send 0 or _serial
@@ -94,7 +94,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             let word2 = (len << 16) | 5u32;
             msg.extend_from_slice(&word2.to_ne_bytes());
             msg.extend_from_slice(&builder.payload);
-            ctx.host_to_client_queue.push((msg, Vec::new()));
+            ctx.host_to_client_queue.push((msg.into(), Vec::new()));
         }
         Action::Drop
     }
@@ -144,7 +144,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                     let word2 = (len << 16) | 3u32;
                     msg.extend_from_slice(&word2.to_ne_bytes());
                     msg.extend_from_slice(&builder.payload);
-                    ctx.host_to_client_queue.push((msg, Vec::new()));
+                    ctx.host_to_client_queue.push((msg.into(), Vec::new()));
                 }
             }
         }
@@ -258,7 +258,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
         }
 
         if let Some(host_ext_manager_id) = ctx.host_text_input_extension_v1_id {
@@ -273,7 +273,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
         }
 
         ctx.shadow_table.map_id(id, host_v1_id);
@@ -397,7 +397,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                     let word2 = len << 16;
                     full_msg.extend_from_slice(&word2.to_ne_bytes());
                     full_msg.extend_from_slice(&builder.payload);
-                    ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                    ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
                 } else {
                     // deactivate: opcode 1
                     let mut builder = crate::wire::MessageBuilder::new();
@@ -409,7 +409,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                     let word2 = (len << 16) | 1u32;
                     full_msg.extend_from_slice(&word2.to_ne_bytes());
                     full_msg.extend_from_slice(&builder.payload);
-                    ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                    ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
                 }
                 state.enabled_changed = false;
             }
@@ -427,7 +427,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 let word2 = (len << 16) | 5u32;
                 full_msg.extend_from_slice(&word2.to_ne_bytes());
                 full_msg.extend_from_slice(&builder.payload);
-                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
             }
 
             if state.content_hint != 0 || state.content_purpose != 0 {
@@ -442,7 +442,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 let word2 = (len << 16) | 6u32;
                 full_msg.extend_from_slice(&word2.to_ne_bytes());
                 full_msg.extend_from_slice(&builder.payload);
-                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
 
                 // map to zcr_extended_text_input_v1::set_input_type
                 // 0: normal->text(1), 1: alpha->text(1), 2: digits->number(2), 3: number->number(2),
@@ -476,7 +476,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 let ext_word2 = (ext_len << 16) | 6u32; // REQ_SET_INPUT_TYPE
                 ext_msg.extend_from_slice(&ext_word2.to_ne_bytes());
                 ext_msg.extend_from_slice(&ext_builder.payload);
-                ctx.client_to_host_queue.push((ext_msg, Vec::new()));
+                ctx.client_to_host_queue.push((ext_msg.into(), Vec::new()));
 
                 state.content_hint = 0;
                 state.content_purpose = 0;
@@ -496,7 +496,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 let word2 = (len << 16) | 7u32;
                 full_msg.extend_from_slice(&word2.to_ne_bytes());
                 full_msg.extend_from_slice(&builder.payload);
-                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+                ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
             }
 
             // commit_state: opcode 9
@@ -509,7 +509,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             let word2 = (len << 16) | 9u32;
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
         }
 
         Action::Drop
