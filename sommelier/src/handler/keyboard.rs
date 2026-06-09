@@ -93,7 +93,13 @@ impl MmapView {
 impl Drop for MmapView {
     fn drop(&mut self) {
         // Safety: ptr and len were set by mmap and never modified.
-        unsafe { let _ = nix::sys::mman::munmap(self.ptr, self.len); }
+        // munmap can only fail with EINVAL (bad addr/len alignment), which
+        // cannot happen here because ptr and len came directly from a
+        // successful mmap call and are never mutated. The debug_assert
+        // catches any future copy-paste of this code into a context where
+        // that invariant might not hold.
+        let res = unsafe { nix::sys::mman::munmap(self.ptr, self.len) };
+        debug_assert!(res.is_ok(), "munmap on a valid mmap mapping must not fail: {:?}", res);
     }
 }
 
@@ -154,6 +160,13 @@ impl KeyboardHandler {
         // level) is considered. key_get_syms_by_level at level 0 would always
         // return the unshifted symbol, causing <Shift>-modified accelerators to
         // fail to match when Shift is held.
+        //
+        // key_get_one_sym returns KEY_NoSymbol when more than one keysym is
+        // mapped to this key at the current shift level (e.g. dead keys or
+        // Unicode combining sequences). In that case we conservatively return
+        // false (do not treat the key as a host accelerator), which is the
+        // correct safe default: we'd rather forward an unknown key to the guest
+        // than accidentally suppress it.
         let sym = state.key_get_one_sym(xkb_keycode);
         if sym.raw() == xkb::keysyms::KEY_NoSymbol {
             return false;

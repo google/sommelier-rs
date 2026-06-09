@@ -400,6 +400,21 @@ impl Context {
         }
     }
 
+    /// Test-only constructor that bypasses `SOMMELIER_ACCELERATORS` env-var reading.
+    ///
+    /// Using `Context::new` in unit tests means the test outcome depends on
+    /// whether the developer's shell has `SOMMELIER_ACCELERATORS` set. Most
+    /// tests override `ctx.accelerators` immediately after construction, so
+    /// the bleed only affects tests that do not; but having a stable constructor
+    /// avoids the silent dependency entirely.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
+        let mut ctx = Self::new(gpu_accel, xdg_decoration);
+        ctx.accelerators = accelerators;
+        ctx
+    }
+
 }
 
 #[cfg(test)]
@@ -407,25 +422,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allocate_host_id_skips_zero_and_one() {
+    fn allocate_host_id_skips_zero_and_one_after_wrap() {
+        // Verify that when next_host_id wraps from u32::MAX to 0, the allocator
+        // correctly skips the reserved IDs (0 = null, 1 = wl_display) and returns
+        // a valid ID ≥ 2 on both the allocation that reads u32::MAX *and* the
+        // subsequent allocation that reads the post-wrap value.
+        //
+        // Walk-through:
+        //   iter 0: id = u32::MAX, advance → wrapping_add(1)=0, .max(2)=2
+        //           u32::MAX >= 2 and not in map → return u32::MAX  ✓
+        //   (next call) iter 0: id = 2, advance → 3
+        //                       2 >= 2 and not in map → return 2  ✓
         let mut table = ShadowTable::new();
-        // Drain the normal range and force a wrap-around.
-        // We fill IDs 2..=u32::MAX (not practical), so instead we simulate
-        // the internal state just after a wrap by directly setting next_host_id.
         table.next_host_id = u32::MAX;
-        // Allocate once: should skip MAX itself only if it's in the map.
-        // MAX is not in the map so it gets returned.
-        let id = table.allocate_host_id();
-        assert!(id >= 2, "must never return 0 or 1, got {}", id);
+
+        let id1 = table.allocate_host_id();
+        assert!(id1 >= 2, "must never return 0 or 1, got {}", id1);
+
+        // The second allocation happens after the counter has wrapped to 2.
+        // It must also return a valid ID and must not collide with id1.
+        let id2 = table.allocate_host_id();
+        assert!(id2 >= 2, "post-wrap allocation must skip reserved IDs, got {}", id2);
+        assert_ne!(id1, id2, "successive allocations must return distinct IDs");
     }
 
     #[test]
     fn allocate_host_id_wraps_correctly() {
+        // Verify that starting with next_host_id = 0 (simulating a state where
+        // the counter was somehow zeroed) results in the first returned ID being
+        // a valid value ≥ 2.
+        //
+        // Walk-through:
+        //   iter 0: id = 0, advance → wrapping_add(1)=1, .max(2)=2
+        //           0 < 2 → skip
+        //   iter 1: id = 2, advance → 3
+        //           2 >= 2 and not in map → return 2  ✓
         let mut table = ShadowTable::new();
-        // Simulate state right after wrapping: next_host_id is 0 → adjusted to 2.
         table.next_host_id = 0;
         let id = table.allocate_host_id();
-        assert!(id >= 2, "post-wrap allocation must skip reserved IDs, got {}", id);
+        assert!(id >= 2, "post-zero allocation must skip reserved IDs, got {}", id);
     }
 
     #[test]
