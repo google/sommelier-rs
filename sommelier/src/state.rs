@@ -21,7 +21,6 @@ use std::sync::{Arc, RwLock};
 use crate::allocator::Allocator;
 use crate::virtwl_channel::VirtWaylandChannel;
 use log::warn;
-use smallvec::SmallVec;
 
 /// A Wayland object ID allocated by the **guest** (client) side.
 ///
@@ -107,6 +106,10 @@ impl ShadowTable {
     }
 
     pub fn allocate_host_id(&mut self) -> u32 {
+        // NOTE: If every ID in [2, u32::MAX] is simultaneously live this loop
+        // will never terminate. In practice sommelier proxies a single Wayland
+        // session whose total object count is bounded by the compositor (Exo
+        // caps it in the thousands), so exhaustion is not a realistic concern.
         loop {
             let id = self.next_host_id;
             // Advance and skip the Wayland-reserved IDs 0 (null) and 1 (wl_display).
@@ -147,6 +150,14 @@ impl ShadowTable {
     ///
     /// Call this when a host object is destroyed (e.g. `zcr_extended_keyboard_v1.destroy`)
     /// to prevent stale events for the recycled ID from being dispatched.
+    ///
+    /// # Pipelining note
+    /// The `destroy` request and this registration removal are applied immediately
+    /// on the client side, but the host compositor processes them asynchronously.
+    /// Events for `host_id` that were already queued by the host (e.g. `peek_key`
+    /// in protocol v2+) may arrive after the destroy is sent. Those events will
+    /// be silently dropped by the dispatcher once the registration is gone, which
+    /// is the correct behavior. Exo does not send events after processing `destroy`.
     pub fn remove_host_interface(&mut self, host_id: u32) {
         self.host_interfaces.remove(&host_id);
     }
@@ -302,14 +313,9 @@ pub struct Context {
     pub active_surface_for_seat: HashMap<u32, u32>,
     pub last_sender_id: u32,
     /// Pending messages to send from client→host (e.g. ack_key, bind requests).
-    ///
-    /// `SmallVec<[u8; 32]>` stores messages ≤ 32 bytes inline (all three
-    /// keyboard extension messages are ≤ 16 bytes), so the hot-path
-    /// `send_ack_key` call incurs **zero heap allocations** for the message
-    /// buffer. Larger messages (registry bind, text-input, etc.) fall back
-    /// to heap automatically, matching the previous `Vec<u8>` behaviour.
-    pub client_to_host_queue: Vec<(SmallVec<[u8; 32]>, Vec<RawFd>)>,
-    pub host_to_client_queue: Vec<(SmallVec<[u8; 32]>, Vec<RawFd>)>,
+    pub client_to_host_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
+    /// Pending messages to send from host→client (e.g. synthetic wl_shm.format).
+    pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
     pub allocator: Option<Allocator>,
     pub virtwayland_channel: Option<Arc<VirtWaylandChannel>>,
     pub host_dmabuf_id: Option<u32>,

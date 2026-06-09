@@ -233,7 +233,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             };
             debug!("Dup for send={} size={}", fd_to_send, total_size);
 
-            ctx.client_to_host_queue.push((full_msg.into(), vec![fd_to_send]));
+            ctx.client_to_host_queue.push((full_msg, vec![fd_to_send]));
 
             // wl_shm_pool.create_buffer(new_id, offset, width, height, stride, format)
             let host_buffer_id = ctx.shadow_table.allocate_host_id();
@@ -252,7 +252,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             // wl_shm_pool.destroy()
             let builder = MessageBuilder::new();
@@ -263,7 +263,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             // Store mapping
             ctx.shadow_table.map_id(id, host_buffer_id);
@@ -352,7 +352,7 @@ impl protocols::wayland::wl_buffer::WlBufferHandler for ShmHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
         }
 
         ctx.buffers.remove(&guest_id);

@@ -69,7 +69,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             let word2 = (len << 16) | (wl_registry::EVT_GLOBAL as u32);
             global_msg.extend_from_slice(&word2.to_ne_bytes());
             global_msg.extend_from_slice(&global_builder.payload);
-            ctx.host_to_client_queue.push((global_msg.into(), Vec::new()));
+            ctx.host_to_client_queue.push((global_msg, Vec::new()));
 
             // 2. Bind internally
             let registry_host_id = ctx.last_sender_id;
@@ -86,7 +86,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             // Drop the original global event so we don't send the v4 advertisement
             return Action::Drop;
@@ -114,7 +114,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             let word2 = (len << 16) | (wl_registry::EVT_GLOBAL as u32);
             global_msg.extend_from_slice(&word2.to_ne_bytes());
             global_msg.extend_from_slice(&global_builder.payload);
-            ctx.host_to_client_queue.push((global_msg.into(), Vec::new()));
+            ctx.host_to_client_queue.push((global_msg, Vec::new()));
 
             // 2. Bind internally
             let registry_host_id = ctx.last_sender_id;
@@ -131,7 +131,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             return Action::Drop;
         } else if interface == "zcr_text_input_extension_v1" {
@@ -155,7 +155,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             return Action::Drop;
         } else if interface == "zcr_keyboard_extension_v1" {
@@ -183,7 +183,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
             log::debug!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
 
             return Action::Drop;
@@ -209,7 +209,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
         }
 
         let is_allowed = WL_ALLOWED.contains(&interface.as_str())
@@ -250,7 +250,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
                 full_msg.extend_from_slice(&builder.payload);
 
                 // Send to client
-                ctx.host_to_client_queue.push((full_msg.into(), Vec::new()));
+                ctx.host_to_client_queue.push((full_msg, Vec::new()));
             }
 
             return Action::Drop;
@@ -290,7 +290,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             full_msg.extend_from_slice(&word2.to_ne_bytes());
             full_msg.extend_from_slice(&builder.payload);
 
-            ctx.client_to_host_queue.push((full_msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
         } else {
             error!("Registry not mapped! Guest ID: {}", registry_guest_id);
         }

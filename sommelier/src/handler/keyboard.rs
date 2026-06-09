@@ -29,7 +29,6 @@ limitations under the License.
 use crate::protocols::wayland::wl_keyboard;
 use crate::state::{Context, GuestId, HostId};
 use crate::wire::{Action, MessageBuilder};
-use smallvec::SmallVec;
 use xkbcommon::xkb;
 
 /// `wl_keyboard.key` state values (Wayland spec §wl_keyboard.key).
@@ -39,13 +38,18 @@ const WL_KEY_RELEASED: u32 = 0;
 /// `wl_keyboard.keymap` format value for XKB (Wayland spec §wl_keyboard.keymap_format).
 const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 
-/// Opcodes for `zcr_extended_keyboard_v1` requests
-/// (keyboard-extension-unstable-v1.xml, interface `zcr_extended_keyboard_v1`).
+// Opcodes are taken directly from the XML protocol definition:
+// third_party/protocols/keyboard-extension-unstable-v1.xml
+//
+// zcr_extended_keyboard_v1 requests:
+//   request index 0 = destroy
+//   request index 1 = ack_key
+// zcr_keyboard_extension_v1 requests:
+//   request index 0 = get_extended_keyboard
+//
+// If the XML is ever updated, these constants MUST be kept in sync.
 const ZCR_EXTENDED_KEYBOARD_DESTROY: u16 = 0;
 const ZCR_EXTENDED_KEYBOARD_ACK_KEY: u16 = 1;
-
-/// Opcode for `zcr_keyboard_extension_v1.get_extended_keyboard` request
-/// (interface `zcr_keyboard_extension_v1`).
 const ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD: u16 = 0;
 
 /// A read-only view of a shared-memory fd mapped into the process address space.
@@ -101,22 +105,30 @@ pub struct KeyboardHandler {
     modifiers: u32,
     /// Keys dropped on press; their release events are also dropped.
     dropped_keys: std::collections::HashSet<u32>,
+    /// Statically enforce `!Sync`: `KeyboardHandler` must never be shared
+    /// across threads. `xkb::State` uses non-atomic interior mutation.
+    _not_sync: std::marker::PhantomData<*mut ()>,
 }
 
 // # Safety
 //
-// `xkb::Context`, `Keymap`, and `State` are not `Send`, but `KeyboardHandler`
-// is only ever accessed from the single Tokio task that owns the `Client`.
-// The Tokio runtime requires `Send` for task-spawned futures; we satisfy that
-// requirement manually and guarantee exclusive single-thread access ourselves.
+// `xkb::Context`, `Keymap`, and `State` are not `Send`. `KeyboardHandler`
+// is only ever accessed from the single Tokio task that owns the `Client`;
+// Tokio requires `Send` for spawned futures, so we satisfy it manually.
 //
-// NOTE: `MmapView` is NOT a field of `KeyboardHandler`; it is only used as a
-// stack-local inside `on_keymap` and is dropped before returning. Adding an
-// `MmapView` field in the future would violate this Send impl (raw pointer,
-// not Send) and must be re-evaluated at that point.
+// INVARIANT: This `Send` impl is valid ONLY because:
+//   1. `KeyboardHandler` is exclusively owned by one `Client` task.
+//   2. `Client` tasks are never migrated across threads by the runtime
+//      configuration used in main.rs (each client gets its own task,
+//      the runtime may use a thread pool, but no OTHER task touches this
+//      handler — there is no shared reference).
+//   3. `Sync` is statically inhibited via `PhantomData<*mut ()>`, so no
+//      shared reference (`&KeyboardHandler`) can be sent across threads.
 //
-// NOTE: `Sync` is intentionally NOT implemented — `xkb::State` must never be
-// accessed concurrently from multiple threads.
+// *** AUDIT REQUIRED if any of the following changes: ***
+//   - The Tokio executor type (e.g., adding current_thread runtime)
+//   - The handler lifecycle (e.g., storing it in an Arc)
+//   - The field list of KeyboardHandler (e.g., adding a raw pointer)
 unsafe impl Send for KeyboardHandler {}
 
 impl KeyboardHandler {
@@ -127,6 +139,7 @@ impl KeyboardHandler {
             state: None,
             modifiers: 0,
             dropped_keys: std::collections::HashSet::new(),
+            _not_sync: std::marker::PhantomData,
         }
     }
 }
@@ -138,28 +151,25 @@ impl Default for KeyboardHandler {
 }
 
 impl KeyboardHandler {
-    /// Build a Wayland wire message into a `SmallVec<[u8; 32]>`.
+    /// Build a Wayland wire message into a `Vec<u8>`.
     ///
-    /// The message layout is `[sender_id(4)][size<<16|opcode(4)][payload...]`.
-    /// For payloads ≤ 24 bytes (all three keyboard extension messages are ≤ 8
-    /// bytes of payload, 16 bytes total) the returned buffer is stored inline
-    /// on the stack — **zero heap allocations** for the keyboard hot path.
+    /// Wire layout per the Wayland specification §4.3 (Wire Format):
+    ///   - Word 0 (bytes 0–3): `sender_id` (u32, native-endian)
+    ///   - Word 1 (bytes 4–7): `(total_len_bytes << 16) | opcode` (u32, native-endian)
+    ///     - Upper 16 bits: total message length in bytes (header + payload)
+    ///     - Lower 16 bits: request/event opcode
+    ///   - Remaining bytes: payload (0 or more u32-aligned words)
     ///
-    /// Callers must supply the payload as a `[u8; N]` array (not a `Vec`) so
-    /// that the compiler can verify at the callsite that no intermediate heap
-    /// allocation is introduced.
-    fn build_wayland_msg(sender_id: u32, opcode: u16, payload: &[u8]) -> SmallVec<[u8; 32]> {
-        // Wayland wire format: total message length is encoded in 16 bits.
-        // All internal keyboard extension messages are ≤ 16 bytes, so this
-        // assertion should never fire in practice — it guards against future
-        // callers accidentally passing large payloads.
+    /// All keyboard extension messages have ≤ 8 bytes of payload (16 bytes
+    /// total including the header), well within the 65535-byte wire limit.
+    fn build_wayland_msg(sender_id: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
         debug_assert!(
             payload.len() + 8 <= 0xFFFF,
             "Wayland message payload too large for wire format ({} bytes)",
             payload.len()
         );
         let total_len = (payload.len() + 8) as u32;
-        let mut msg: SmallVec<[u8; 32]> = SmallVec::new();
+        let mut msg = Vec::with_capacity(8 + payload.len());
         msg.extend_from_slice(&sender_id.to_ne_bytes());
         msg.extend_from_slice(&((total_len << 16) | opcode as u32).to_ne_bytes());
         msg.extend_from_slice(payload);
@@ -197,6 +207,15 @@ impl KeyboardHandler {
     /// and at that point we only have the guest keyboard ID. `on_enter` is always
     /// sent by the host before any `wl_keyboard.key` event, so this is safe:
     /// the extended keyboard will be bound before the first key event.
+    ///
+    /// # Ordering invariant
+    /// `get_extended_keyboard` is sent via `client_to_host_queue` and will be
+    /// flushed in the same proxy loop iteration as the forwarded `wl_keyboard.enter`
+    /// event. Exo enables `SetNeedKeyboardKeyAcks(true)` upon processing
+    /// `get_extended_keyboard`. Any key events queued by the compositor *before*
+    /// this request is processed (e.g. auto-repeat already in-flight) will not have
+    /// an active TTL in `pending_key_acks_`; Exo will apply its default policy for
+    /// those keys. This mirrors the behavior of the C sommelier reference.
     pub(crate) fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
             if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
@@ -219,7 +238,7 @@ impl KeyboardHandler {
                     ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD,
                     &payload,
                 );
-                ctx.client_to_host_queue.push((msg.into(), Vec::new()));
+                ctx.client_to_host_queue.push((msg, Vec::new()));
                 log::debug!(
                     "Bound extended keyboard: host_extended_id={} for host_keyboard_id={}",
                     host_extended_id.0,
@@ -252,9 +271,6 @@ impl KeyboardHandler {
             return;
         };
         // zcr_extended_keyboard_v1.ack_key — payload = [serial(4)][handled(4)].
-        // Build the 8-byte payload as a stack array: zero intermediate allocations.
-        // SmallVec<[u8;32]> stores the full 16-byte message inline, so the
-        // push to client_to_host_queue is also allocation-free.
         let payload = {
             let mut buf = [0u8; 8];
             buf[0..4].copy_from_slice(&serial.to_ne_bytes());
@@ -262,7 +278,7 @@ impl KeyboardHandler {
             buf
         };
         let msg = Self::build_wayland_msg(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_ACK_KEY, &payload);
-        ctx.client_to_host_queue.push((msg.into(), Vec::new()));
+        ctx.client_to_host_queue.push((msg, Vec::new()));
     }
 }
 
@@ -364,7 +380,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         let word2 = len << 16;
                         msg.extend_from_slice(&word2.to_ne_bytes());
                         msg.extend_from_slice(&builder.payload);
-                        ctx.host_to_client_queue.push((msg.into(), Vec::new()));
+                        ctx.host_to_client_queue.push((msg, Vec::new()));
                     }
                 }
             }
@@ -398,7 +414,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         let word2 = (len << 16) | 1u32;
                         msg.extend_from_slice(&word2.to_ne_bytes());
                         msg.extend_from_slice(&builder.payload);
-                        ctx.host_to_client_queue.push((msg.into(), Vec::new()));
+                        ctx.host_to_client_queue.push((msg, Vec::new()));
                     }
                 }
             }
@@ -452,6 +468,16 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     }
 
     /// Track modifier state so on_key can resolve the correct keysym.
+    ///
+    /// # Modifier policy: DEPRESSED | LATCHED only (no LOCKED)
+    /// We intentionally exclude `STATE_MODS_LOCKED` (Caps Lock, etc.) from the
+    /// accelerator modifier check. The C sommelier reference makes the same
+    /// choice: host accelerators are defined in terms of actively-pressed keys,
+    /// not persistent lock state. A `<Shift>` accelerator would not match when
+    /// Caps Lock is on but Shift is not held — this is consistent with how
+    /// ChromeOS accelerator keys are documented and tested.
+    /// If locked-modifier accelerators are ever needed, change `components` to
+    /// `xkb::STATE_MODS_EFFECTIVE` (which ORs depressed, latched, and locked).
     fn on_modifiers(
         &mut self,
         _ctx: &mut Context,
@@ -505,7 +531,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
             // zcr_extended_keyboard_v1.destroy — no payload (8-byte header only).
             let msg = Self::build_wayland_msg(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_DESTROY, &[]);
-            ctx.client_to_host_queue.push((msg.into(), Vec::new()));
+            ctx.client_to_host_queue.push((msg, Vec::new()));
             // Unregister from the host dispatch table so stale peek_key events
             // (version ≥ 2) sent after destroy cannot be dispatched to a dead object.
             ctx.shadow_table.remove_host_interface(host_extended_id.0);
@@ -519,9 +545,14 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     }
 }
 
-// Empty impls for keyboard extension protocol handlers.
-// We don't receive requests/events on these; we only send ack_key.
+/// `zcr_keyboard_extension_v1` handler — sommelier only sends requests to this
+/// interface (i.e. `get_extended_keyboard`); the host never sends events back to
+/// the factory object, so all event callbacks are empty.
 impl crate::protocols::keyboard_extension_unstable_v1::zcr_keyboard_extension_v1::ZcrKeyboardExtensionV1Handler for KeyboardHandler {}
+
+/// `zcr_extended_keyboard_v1` handler — sommelier only sends requests to this
+/// interface (i.e. `ack_key`, `destroy`); no host events are expected in the
+/// v1 protocol (peek_key is a v2 addition and is explicitly not requested).
 impl crate::protocols::keyboard_extension_unstable_v1::zcr_extended_keyboard_v1::ZcrExtendedKeyboardV1Handler for KeyboardHandler {}
 
 #[cfg(test)]
