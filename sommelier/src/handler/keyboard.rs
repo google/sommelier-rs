@@ -27,13 +27,16 @@ limitations under the License.
 //! See `docs/KEYBOARD_SHORTCUT_INHIBITION.md` for the full protocol flow.
 
 use crate::protocols::wayland::wl_keyboard;
-use crate::state::Context;
+use crate::state::{Context, GuestId, HostId};
 use crate::wire::{Action, MessageBuilder};
 use xkbcommon::xkb;
 
 /// `wl_keyboard.key` state values (Wayland spec §wl_keyboard.key).
 const WL_KEY_PRESSED: u32 = 1;
 const WL_KEY_RELEASED: u32 = 0;
+
+/// `wl_keyboard.keymap` format value for XKB (Wayland spec §wl_keyboard.keymap_format).
+const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 
 /// A read-only view of a shared-memory fd mapped into the process address space.
 ///
@@ -109,12 +112,15 @@ impl KeyboardHandler {
 
     /// Check if the pressed key matches any configured host accelerators.
     fn is_host_accelerator(&self, accelerators: &[crate::accelerator::Accelerator], key: u32) -> bool {
-        let Some(xkb_state) = &self.state else {
-            return false;
-        };
-        // Wayland key codes are evdev codes; XKB adds an offset of 8.
-        let code = (key + 8).into();
-        let syms = xkb_state.key_get_syms(code);
+        let Some(state) = &self.state else { return false; };
+        let Some(keymap) = &self.keymap else { return false; };
+
+        let xkb_keycode = xkb::Keycode::new(key + 8);
+        let syms = keymap.key_get_syms_by_level(xkb_keycode, state.key_get_layout(xkb_keycode), 0);
+
+        // Only match keys that resolve to exactly one keysym. Keys producing
+        // 0 or 2+ symbols are ambiguous and intentionally excluded from
+        // accelerator matching to avoid spurious intercepts.
         if syms.len() == 1 {
             let lower_sym = crate::accelerator::keysym_to_lower(syms[0].raw());
             for acc in accelerators {
@@ -128,22 +134,22 @@ impl KeyboardHandler {
     }
 
     /// Lazily bind zcr_keyboard_extension_v1.get_extended_keyboard.
-    fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: u32) {
+    fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
             if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
-                let host_extended_id = ctx.shadow_table.allocate_host_id();
+                let host_extended_id = HostId(ctx.shadow_table.allocate_host_id());
                 ctx.keyboard_to_extended_keyboard
                     .insert(host_keyboard_id, host_extended_id);
                 ctx.shadow_table
-                    .track_host_interface(host_extended_id, "zcr_extended_keyboard_v1".to_string());
+                    .track_host_interface(host_extended_id.0, "zcr_extended_keyboard_v1".to_string());
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
                 let mut builder = MessageBuilder::new();
-                builder.write_u32(host_extended_id);
-                builder.write_u32(host_keyboard_id);
+                builder.write_u32(host_extended_id.0);
+                builder.write_u32(host_keyboard_id.0);
 
                 let mut msg = Vec::new();
-                msg.extend_from_slice(&extension_host_id.to_ne_bytes());
+                msg.extend_from_slice(&extension_host_id.0.to_ne_bytes());
                 let len = (builder.payload.len() + 8) as u32;
                 let word2 = len << 16; // opcode 0: get_extended_keyboard
                 msg.extend_from_slice(&word2.to_ne_bytes());
@@ -151,15 +157,15 @@ impl KeyboardHandler {
                 ctx.client_to_host_queue.push((msg, Vec::new()));
                 log::debug!(
                     "Bound extended keyboard: host_extended_id={} for host_keyboard_id={}",
-                    host_extended_id,
-                    host_keyboard_id
+                    host_extended_id.0,
+                    host_keyboard_id.0
                 );
             }
         }
     }
 
     /// Send zcr_extended_keyboard_v1.ack_key to the host.
-    fn send_ack_key(&self, ctx: &mut Context, host_keyboard_id: u32, serial: u32, handled: bool) {
+    fn send_ack_key(&self, ctx: &mut Context, host_keyboard_id: HostId, serial: u32, handled: bool) {
         if let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) {
             let handled_val: u32 = if handled { 1 } else { 0 };
             let mut builder = MessageBuilder::new();
@@ -167,7 +173,7 @@ impl KeyboardHandler {
             builder.write_u32(handled_val);
 
             let mut msg = Vec::new();
-            msg.extend_from_slice(&host_extended_id.to_ne_bytes());
+            msg.extend_from_slice(&host_extended_id.0.to_ne_bytes());
             let len = (builder.payload.len() + 8) as u32;
             let word2 = (len << 16) | 1u32; // opcode 1: ack_key
             msg.extend_from_slice(&word2.to_ne_bytes());
@@ -190,7 +196,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         size: u32,
     ) -> Action {
         // Only handle XKB_V1 format keymaps.
-        if format != 1 {
+        if format != WL_KEYMAP_FORMAT_XKB_V1 {
             return Action::Forward;
         }
 
@@ -231,8 +237,9 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         surface: u32, // Host ID
         _keys: &[u8],
     ) -> Action {
-        let host_keyboard_id = ctx.last_sender_id;
-        let guest_keyboard_id = ctx.shadow_table.get_guest_id(host_keyboard_id).unwrap_or(0);
+        // on_enter is a host→client event: last_sender_id is the host keyboard ID.
+        let host_keyboard_id = HostId(ctx.last_sender_id);
+        let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
         // Lazily bind the extended keyboard object on first enter.
@@ -270,8 +277,9 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     }
 
     fn on_leave(&mut self, ctx: &mut Context, _serial: u32, surface: u32) -> Action {
-        let host_keyboard_id = ctx.last_sender_id;
-        let guest_keyboard_id = ctx.shadow_table.get_guest_id(host_keyboard_id).unwrap_or(0);
+        // on_leave is a host→client event: last_sender_id is the host keyboard ID.
+        let host_keyboard_id = HostId(ctx.last_sender_id);
+        let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
         if guest_surface_id != 0 {
@@ -312,7 +320,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         key: u32,
         state: u32,
     ) -> Action {
-        let host_keyboard_id = ctx.last_sender_id;
+        // on_key is a host→client event: last_sender_id is the host keyboard ID.
+        let host_keyboard_id = HostId(ctx.last_sender_id);
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 
@@ -376,23 +385,28 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
     /// Clean up when the guest destroys the wl_keyboard object.
     ///
-    /// Sends `zcr_extended_keyboard_v1.destroy` to the host and removes the
-    /// keyboard→extended-keyboard mapping. Without this, re-binding a keyboard
-    /// (e.g. after a seat change) would fail silently because
-    /// `bind_extended_keyboard` guards with `contains_key`.
+    /// `on_release` is a **client→host request**: `ctx.last_sender_id` is the
+    /// **guest** keyboard ID. We must translate it to a host ID before looking
+    /// up `keyboard_to_extended_keyboard` (which is keyed by host IDs).
+    /// Using the typed [`GuestId`] / [`HostId`] wrappers makes a wrong-direction
+    /// lookup a compile error.
     fn on_release(&mut self, ctx: &mut Context) -> Action {
-        let host_keyboard_id = ctx.last_sender_id;
+        // Translate guest ID → host ID. Returns None for unknown keyboards
+        // (e.g. keyboards that never received an on_enter event).
+        let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId(ctx.last_sender_id)) else {
+            return Action::Forward;
+        };
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
             // zcr_extended_keyboard_v1.destroy is opcode 0, no payload.
             let mut msg = Vec::new();
-            msg.extend_from_slice(&host_extended_id.to_ne_bytes());
+            msg.extend_from_slice(&host_extended_id.0.to_ne_bytes());
             let word2 = 8u32 << 16; // len=8, opcode=0 (destroy)
             msg.extend_from_slice(&word2.to_ne_bytes());
             ctx.client_to_host_queue.push((msg, Vec::new()));
             log::debug!(
                 "Destroyed extended keyboard: host_extended_id={} for host_keyboard_id={}",
-                host_extended_id,
-                host_keyboard_id
+                host_extended_id.0,
+                host_keyboard_id.0
             );
         }
         Action::Forward
@@ -467,7 +481,7 @@ mod tests {
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
         // Set up extended keyboard tracking so ack_key is sent
-        ctx.keyboard_to_extended_keyboard.insert(0, 50);
+        ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
         ctx.last_sender_id = 0;
 
         // Ctrl+A should be dropped (host accelerator)
@@ -499,7 +513,7 @@ mod tests {
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
-        ctx.keyboard_to_extended_keyboard.insert(0, 50);
+        ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
         ctx.last_sender_id = 0;
 
         // Ctrl+B is NOT in accelerators → forward to guest
@@ -529,7 +543,7 @@ mod tests {
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
-        ctx.keyboard_to_extended_keyboard.insert(0, 50);
+        ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
         ctx.last_sender_id = 0;
 
         // Press → Drop
@@ -600,16 +614,25 @@ mod tests {
         let mut handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
 
-        // Simulate a bound extended keyboard (host_keyboard_id=10 → host_extended_id=50).
-        ctx.keyboard_to_extended_keyboard.insert(10, 50);
-        ctx.last_sender_id = 10;
+        // Use DISTINCT guest (5) and host (10) IDs to verify that on_release
+        // correctly translates the guest sender ID to the host key, rather than
+        // using last_sender_id (a guest ID) directly as a host map key.
+        let guest_keyboard_id: u32 = 5;
+        let host_keyboard_id: u32 = 10;
+        let host_extended_id: u32 = 50;
+
+        ctx.shadow_table.map_id(guest_keyboard_id, host_keyboard_id);
+        ctx.keyboard_to_extended_keyboard
+            .insert(HostId(host_keyboard_id), HostId(host_extended_id));
+        // Simulate a wl_keyboard.release from the guest (last_sender_id = guest ID).
+        ctx.last_sender_id = guest_keyboard_id;
 
         let action = handler.on_release(&mut ctx);
         assert_eq!(action, Action::Forward);
 
         // Map entry must be removed so re-binding is possible.
         assert!(
-            !ctx.keyboard_to_extended_keyboard.contains_key(&10),
+            !ctx.keyboard_to_extended_keyboard.contains_key(&HostId(host_keyboard_id)),
             "extended keyboard map must be cleared after release"
         );
 
@@ -619,7 +642,7 @@ mod tests {
         // Message: [sender_id(4)] [size_opcode(4)]  — opcode 0, len 8.
         let sender = u32::from_ne_bytes(msg[0..4].try_into().unwrap());
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
-        assert_eq!(sender, 50, "destroy must target host_extended_id");
+        assert_eq!(sender, host_extended_id, "destroy must target host_extended_id");
         assert_eq!(word2 >> 16, 8, "message length must be 8");
         assert_eq!(word2 & 0xFFFF, 0, "opcode must be 0 (destroy)");
     }
@@ -628,15 +651,15 @@ mod tests {
     fn bind_extended_keyboard_is_idempotent() {
         let handler = KeyboardHandler::new();
         let mut ctx = Context::new(false, false);
-        ctx.host_keyboard_extension_id = Some(99);
+        ctx.host_keyboard_extension_id = Some(HostId(99));
 
         // First call: should send get_extended_keyboard.
-        handler.bind_extended_keyboard(&mut ctx, 10);
+        handler.bind_extended_keyboard(&mut ctx, HostId(10));
         assert_eq!(ctx.client_to_host_queue.len(), 1);
 
         // Second call with the same host_keyboard_id: must not send again.
         ctx.client_to_host_queue.clear();
-        handler.bind_extended_keyboard(&mut ctx, 10);
+        handler.bind_extended_keyboard(&mut ctx, HostId(10));
         assert!(
             ctx.client_to_host_queue.is_empty(),
             "bind must be idempotent: no second get_extended_keyboard"

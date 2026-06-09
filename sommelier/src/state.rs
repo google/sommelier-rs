@@ -22,6 +22,22 @@ use crate::allocator::Allocator;
 use crate::virtwl_channel::VirtWaylandChannel;
 use log::warn;
 
+/// A Wayland object ID allocated by the **guest** (client) side.
+///
+/// Request handlers (client→host) receive guest IDs. Use [`ShadowTable::host_id_of`]
+/// to translate to the corresponding host ID. Passing a `GuestId` where a `HostId`
+/// is expected (or vice versa) is a **compile error**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GuestId(pub u32);
+
+/// A Wayland object ID allocated by the **host** compositor side.
+///
+/// Event handlers (host→client) receive host IDs. Use [`ShadowTable::guest_id_of`]
+/// to translate to the corresponding guest ID. Passing a `HostId` where a `GuestId`
+/// is expected (or vice versa) is a **compile error**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostId(pub u32);
+
 #[allow(dead_code)]
 pub struct ShadowTable {
     guest_to_host: HashMap<u32, u32>,
@@ -88,6 +104,18 @@ impl ShadowTable {
 
     pub fn get_host_interface(&self, host_id: u32) -> Option<&String> {
         self.host_interfaces.get(&host_id)
+    }
+
+    /// Typed lookup: translate a guest-allocated object ID to its host counterpart.
+    /// Use in **client→host request** handlers where `ctx.last_sender_id` is a guest ID.
+    pub fn host_id_of(&self, guest: GuestId) -> Option<HostId> {
+        self.guest_to_host.get(&guest.0).map(|&h| HostId(h))
+    }
+
+    /// Typed lookup: translate a host-allocated object ID to its guest counterpart.
+    /// Use in **host→client event** handlers where `ctx.last_sender_id` is a host ID.
+    pub fn guest_id_of(&self, host: HostId) -> Option<GuestId> {
+        self.host_to_guest.get(&host.0).map(|&g| GuestId(g))
     }
 
     pub fn remove_id(&mut self, guest_id: u32) {
@@ -229,9 +257,14 @@ pub struct Context {
     pub host_text_input_manager_v1_id: Option<u32>,
     pub host_text_input_extension_v1_id: Option<u32>,
     /// Host-side zcr_keyboard_extension_v1 object ID (bound internally on startup).
-    pub host_keyboard_extension_id: Option<u32>,
-    /// Maps host_keyboard_id → host_extended_keyboard_id for ack_key.
-    pub keyboard_to_extended_keyboard: HashMap<u32, u32>,
+    pub host_keyboard_extension_id: Option<HostId>,
+    /// Maps host keyboard ID → host extended-keyboard ID for `ack_key`.
+    ///
+    /// Both key and value are [`HostId`]s intentionally — using [`GuestId`] here
+    /// by mistake is a **compile error**, preventing the direction bug where a
+    /// client→host request handler reads `ctx.last_sender_id` (a guest ID) and
+    /// uses it to look up a host-keyed map.
+    pub keyboard_to_extended_keyboard: HashMap<HostId, HostId>,
     /// Parsed SOMMELIER_ACCELERATORS: keys the host should handle.
     pub accelerators: Vec<crate::accelerator::Accelerator>,
     pub supported_formats: HashSet<u32>,
@@ -284,6 +317,29 @@ impl Context {
             gpu_accel,
             xdg_decoration,
         }
+    }
+
+    /// In a **host→client event** handler: the host object that fired the event.
+    ///
+    /// `ctx.last_sender_id` in the `HostToClient` direction is always a host ID.
+    /// This method wraps it in `HostId` to make that invariant explicit and prevent
+    /// accidental misuse in request handlers where the sender is a guest.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn host_sender(&self) -> HostId {
+        HostId(self.last_sender_id)
+    }
+
+    /// In a **client→host request** handler: translate the guest sender to its
+    /// corresponding host object ID.
+    ///
+    /// `ctx.last_sender_id` in the `ClientToHost` direction is always a guest ID.
+    /// Returns `None` if no host mapping exists (shouldn't happen for well-formed
+    /// sessions; log a warning if it does).
+    #[allow(dead_code)]
+    #[inline]
+    pub fn request_sender_host(&self) -> Option<HostId> {
+        self.shadow_table.host_id_of(GuestId(self.last_sender_id))
     }
 }
 

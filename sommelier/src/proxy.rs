@@ -471,8 +471,6 @@ impl protocols::xdg_decoration_unstable_v1::ProtocolHandler for SommelierHandler
 protocols::fractional_scale_v1::impl_sommelier_delegates!(SommelierHandler, {});
 impl protocols::fractional_scale_v1::ProtocolHandler for SommelierHandler {}
 
-
-
 // Keyboard Extension Protocol (ChromeOS-specific)
 protocols::keyboard_extension_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {
     zcr_keyboard_extension_v1: keyboard,

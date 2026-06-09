@@ -23,7 +23,7 @@ use crate::protocols::wayland::wl_shm;
 use crate::protocols::wayland::ALLOWED_INTERFACES as WL_ALLOWED;
 use crate::protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES as XDG_DECORATION_ALLOWED;
 use crate::protocols::xdg_shell::ALLOWED_INTERFACES as XDG_ALLOWED;
-use crate::state::Context;
+use crate::state::{Context, HostId};
 use crate::wire::{Action, MessageBuilder};
 use log::error;
 
@@ -182,7 +182,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             // specific protocol that enables the ack-key mechanism for
             // controlling host accelerator processing. Not exposed to the guest.
             let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_keyboard_extension_id = Some(host_id);
+            ctx.host_keyboard_extension_id = Some(HostId(host_id));
             let placeholder_guest_id = 0xFA00_0000 | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table.track_interface(
