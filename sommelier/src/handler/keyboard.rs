@@ -72,6 +72,7 @@ impl KeyboardHandler {
             let lower_sym = unsafe { crate::accelerator::xkb_keysym_to_lower(syms[0].raw()) };
             for acc in accelerators {
                 if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
+                    log::debug!("Accelerator match: key={}, modifiers={:#x}, sym={:#x}", key, self.modifiers, lower_sym);
                     return true;
                 }
             }
@@ -131,6 +132,9 @@ impl KeyboardHandler {
 
 impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     /// Parse the keymap to set up XKB state for keysym resolution.
+    /// The host sends keymap data via a shared-memory fd (e.g. memfd).
+    /// We mmap it to read without consuming data, so the fd can still
+    /// be forwarded to the guest client.
     fn on_keymap(
         &mut self,
         _ctx: &mut Context,
@@ -143,37 +147,54 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             return Action::Forward;
         }
 
-        use std::fs::File;
-        use std::mem::ManuallyDrop;
-        use std::os::unix::fs::FileExt;
-        use std::os::unix::io::FromRawFd;
+        use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
+        use std::num::NonZeroUsize;
+        use std::os::unix::io::BorrowedFd;
 
-        // Wrap the raw fd safely without taking ownership or closing it.
-        let file = ManuallyDrop::new(unsafe { File::from_raw_fd(fd) });
+        let Some(nonzero_size) = NonZeroUsize::new(size as usize) else {
+            return Action::Forward;
+        };
 
-        let mut buf = vec![0u8; size as usize];
-        if let Ok(bytes_read) = file.read_at(&mut buf, 0) {
-            if bytes_read > 0 {
-                // Strip the trailing null terminator if present.
-                let len = if buf[bytes_read - 1] == 0 {
-                    bytes_read - 1
-                } else {
-                    bytes_read
-                };
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        let Ok(ptr) = (unsafe {
+            mmap(
+                None,
+                nonzero_size,
+                ProtFlags::PROT_READ,
+                MapFlags::MAP_SHARED,
+                borrowed_fd,
+                0,
+            )
+        }) else {
+            log::error!("on_keymap: mmap failed for fd={}, size={}", fd, size);
+            return Action::Forward;
+        };
 
-                if let Ok(s) = std::str::from_utf8(&buf[..len]) {
-                    if let Some(keymap) = xkb::Keymap::new_from_string(
-                        &self.context,
-                        s.to_string(),
-                        xkb::KEYMAP_FORMAT_TEXT_V1,
-                        xkb::KEYMAP_COMPILE_NO_FLAGS,
-                    ) {
-                        self.state = Some(xkb::State::new(&keymap));
-                        self.keymap = Some(keymap);
-                        log::debug!("XKB keymap loaded successfully");
-                    }
-                }
+        let slice =
+            unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, size as usize) };
+
+        // Strip the trailing null terminator if present.
+        let len = if size > 0 && slice[size as usize - 1] == 0 {
+            size as usize - 1
+        } else {
+            size as usize
+        };
+
+        if let Ok(s) = std::str::from_utf8(&slice[..len]) {
+            if let Some(keymap) = xkb::Keymap::new_from_string(
+                &self.context,
+                s.to_string(),
+                xkb::KEYMAP_FORMAT_TEXT_V1,
+                xkb::KEYMAP_COMPILE_NO_FLAGS,
+            ) {
+                self.state = Some(xkb::State::new(&keymap));
+                self.keymap = Some(keymap);
+                log::info!("XKB keymap loaded successfully");
             }
+        }
+
+        unsafe {
+            let _ = munmap(ptr, size as usize);
         }
 
         Action::Forward
@@ -469,5 +490,55 @@ mod tests {
         // Next press of same key after release should still be evaluated
         let action = handler.on_key(&mut ctx, 3, 0, wl_key_a, 1);
         assert_eq!(action, Action::Drop);
+    }
+
+    /// Regression test: on_keymap must use mmap (not read/pread) because:
+    /// 1. The host sends keymap data via shared memory (memfd). mmap works.
+    /// 2. read() would consume data, preventing the fd from being forwarded.
+    /// 3. pread()/read_at() fails with ESPIPE on non-seekable fds.
+    /// 4. Even on seekable fds, the cursor may be at EOF after the host wrote.
+    ///
+    /// This test creates a memfd, writes the keymap, and does NOT seek back
+    /// to the start — simulating a host that wrote then sent the fd. The
+    /// on_keymap implementation must handle this via mmap (offset 0).
+    #[test]
+    fn keymap_loads_from_non_rewound_memfd() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+
+        let dummy_ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_names(
+            &dummy_ctx,
+            "",
+            "",
+            "",
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let keymap_str = keymap.get_as_string(xkb::KEYMAP_FORMAT_TEXT_V1);
+        let keymap_bytes = keymap_str.as_bytes();
+
+        use nix::sys::memfd::{memfd_create, MFdFlags};
+        use std::ffi::CString;
+
+        let name = CString::new("test-keymap-norw").unwrap();
+        let fd = memfd_create(name.as_c_str(), MFdFlags::empty())
+            .expect("memfd_create failed");
+        nix::unistd::write(&fd, keymap_bytes).expect("write failed");
+        // Deliberately do NOT seek back to 0.
+        // read()/pread() from here would get 0 bytes or fail.
+        // mmap with offset 0 must still work.
+
+        handler.on_keymap(&mut ctx, 1, fd.as_raw_fd(), keymap_bytes.len() as u32 + 1);
+        assert!(
+            handler.keymap.is_some(),
+            "keymap must load via mmap even when fd cursor is at EOF"
+        );
+        assert!(
+            handler.state.is_some(),
+            "XKB state must be initialized after keymap load"
+        );
     }
 }
