@@ -41,19 +41,25 @@ The `zwp_keyboard_shortcuts_inhibit_manager_v1` standard Wayland protocol exists
 but is effectively a **no-op** in Exo — it sets a flag on the surface that is
 never consulted in the accelerator dispatch path.
 
-### What was wrong in the previous branch
+### What was wrong in the upstream `virtwl` branch
 
-The earlier implementation (`feature/keyboard-shortcuts-inhibit`) tried to solve
-this by auto-creating `zwp_keyboard_shortcuts_inhibitor_v1` objects on every
-`wl_keyboard.enter` event. This had two fatal problems:
+The upstream `virtwl` branch (the starting point) had **no implementation of
+`zcr_keyboard_extension_v1` at all**. Without it, Exo operates in Mode 1
+(the default): it sends `wl_keyboard.key` to the client *and simultaneously*
+processes Chrome accelerators on its own, with no input from the client.
 
-1. **The protocol does nothing.** Exo ignores the inhibitor flag when deciding
-   whether to run `ProcessAccelerator()`.
+This means:
 
-2. **All keys were acked as HANDLED.** The `on_key` logic checked if an internal
-   inhibitor was active, and since auto-inhibitors were always active after
-   `on_enter`, *every* key was acked as `HANDLED` — meaning ChromeOS never got
-   to handle *any* accelerators, including things like the launcher key.
+1. **Host accelerators always fire.** Keys like Ctrl+Space (IME toggle), Alt+[
+   (ChromeOS window snap), Super_L (launcher) are all processed by ChromeOS
+   regardless of what the guest app wants to do.
+
+2. **No per-key control is possible.** Without ack mode enabled, there is no
+   wire to send any signal to Exo. The client is just a passive receiver.
+
+The symptom was: Ctrl+Space could not be used for IME input inside the guest
+because ChromeOS was always intercepting it as a system shortcut.
+
 
 ---
 
