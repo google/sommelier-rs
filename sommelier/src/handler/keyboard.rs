@@ -133,17 +133,16 @@ pub struct KeyboardHandler {
 //
 // INVARIANT: This `Send` impl is valid ONLY because:
 //   1. `KeyboardHandler` is exclusively owned by one `Client` task.
-//   2. `Client` tasks are never migrated across threads by the runtime
-//      configuration used in main.rs (each client gets its own task,
-//      the runtime may use a thread pool, but no OTHER task touches this
-//      handler — there is no shared reference).
+//   2. `Client` tasks are never migrated across OS threads. This is guaranteed
+//      by `#[tokio::main(flavor = "current_thread")]` in main.rs, which runs
+//      the entire async runtime on a single OS thread. See the SAFETY INVARIANT
+//      comment above that attribute in main.rs for the rationale.
 //   3. `Sync` is statically inhibited via `PhantomData<*mut ()>`, so no
 //      shared reference (`&KeyboardHandler`) can be sent across threads.
 //
 // *** AUDIT REQUIRED if any of the following changes: ***
-//   - The Tokio executor type (e.g., switching to a multi_thread runtime that
-//     could migrate tasks between OS threads; current_thread is safe because
-//     there is only one thread to migrate to)
+//   - The Tokio executor type in main.rs (the flavor MUST remain
+//     "current_thread"; switching to "multi_thread" makes this impl unsound)
 //   - The handler lifecycle (e.g., storing it in an Arc)
 //   - The field list of KeyboardHandler (e.g., adding a raw pointer)
 unsafe impl Send for KeyboardHandler {}
@@ -613,9 +612,10 @@ mod tests {
     use crate::protocols::wayland::wl_keyboard::WlKeyboardHandler;
     use std::os::unix::io::AsRawFd;
 
-    /// Helper: create an anonymous memfd, write the default keymap into it,
-    /// and call on_keymap so the handler builds its XKB state. Returns the
-    /// keymap object so tests can look up keycodes.
+    /// Helper: create an anonymous memfd, write the default keymap into it
+    /// (with a trailing NUL byte as required by the Wayland spec), and call
+    /// on_keymap so the handler builds its XKB state. Returns the keymap
+    /// object so tests can look up keycodes.
     fn load_test_keymap(handler: &mut KeyboardHandler, ctx: &mut Context) -> xkb::Keymap {
         let dummy_ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         let keymap = xkb::Keymap::new_from_names(
@@ -636,11 +636,15 @@ mod tests {
         use std::ffi::CString;
         let name = CString::new("sommelier-test-keymap").unwrap();
         let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
-        nix::unistd::write(&fd, keymap_str.as_bytes()).expect("write failed");
+        nix::unistd::write(&fd, keymap_str.as_bytes()).expect("write keymap failed");
+        // Write the NUL terminator required by the Wayland spec
+        // (wl_keyboard.keymap.size always includes it). on_keymap's debug_assert
+        // checks for this byte, so omitting it would fire in debug builds.
+        nix::unistd::write(&fd, &[0u8]).expect("write NUL failed");
 
-        // +1: wl_keyboard.keymap.size includes the NUL terminator per the
-        // Wayland spec. on_keymap strips the trailing NUL before parsing.
-        handler.on_keymap(ctx, 1, fd.as_raw_fd(), keymap_str.len() as u32 + 1);
+        // size = string bytes + 1 NUL terminator, matching what a real host sends.
+        let size = keymap_str.len() as u32 + 1;
+        handler.on_keymap(ctx, 1, fd.as_raw_fd(), size);
         assert!(handler.keymap.is_some(), "keymap should be loaded");
         keymap
     }
@@ -1143,6 +1147,16 @@ mod tests {
         assert!(
             handler.dropped_keys.is_empty(),
             "dropped_keys must be cleared on keymap reload to prevent stuck keys after layout change"
+        );
+
+        // After reload, Ctrl+A must still be recognized as a host accelerator
+        // and dropped. This guards against a regression where clearing
+        // dropped_keys also breaks the accelerator matching logic.
+        let action = handler.on_key(&mut ctx, 2, 0, wl_key_a, WL_KEY_PRESSED);
+        assert_eq!(
+            action,
+            Action::Drop,
+            "accelerator must still be recognized and dropped after keymap reload"
         );
     }
 

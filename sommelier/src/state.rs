@@ -99,11 +99,10 @@ impl ShadowTable {
     }
 
     pub fn allocate_host_id(&mut self) -> u32 {
-        // Scan every possible candidate exactly once (u32::MAX iterations, wrapping
-        // back to 2 after u32::MAX). In practice sommelier proxies a single
-        // Wayland session whose total object count is bounded by the compositor
-        // (Exo caps it in the thousands), so exhaustion is not a realistic
-        // concern — but an infinite spin is far worse than a panic.
+        // In the common case (next_host_id points to a free slot) this returns
+        // on the first iteration. The u64 loop bound caps worst-case work at
+        // u32::MAX iterations to prevent an infinite spin when the ID space is
+        // nearly full, and triggers a panic instead of looping forever.
         //
         // We use u64 for the loop variable to avoid an overflow when constructing
         // the `RangeInclusive<u32>`: writing `0u32..=u32::MAX` would require

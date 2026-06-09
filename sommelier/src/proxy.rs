@@ -392,9 +392,11 @@ impl Client {
             // if the send fails the originals remain our responsibility and
             // must be closed to avoid fd leaks.
         }
-        // Close FDs regardless of send success — we own them and must not leak,
-        // even when the send fails. sendmsg(SCM_RIGHTS) duplicates FDs into the
-        // kernel cmsg buffer; the originals remain our responsibility.
+        // FDs are closed unconditionally — we own them and must not leak
+        // regardless of whether the send succeeded or was skipped. When
+        // sendmsg(SCM_RIGHTS) succeeds it duplicates FDs into the kernel
+        // cmsg buffer; the originals are still ours to close. When the send
+        // fails or the buffer was empty, we obviously retain ownership.
         fds_to_close.extend(reverse_out_fds.iter());
 
         fds_to_close.extend(conn.read_fds.iter().take(fd_offset));
