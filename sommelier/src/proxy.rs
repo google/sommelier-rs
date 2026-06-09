@@ -362,6 +362,12 @@ impl Client {
         // processing a host→client wl_keyboard.key event queues an ack_key
         // message back to the host via client_to_host_queue. Flush that queue
         // now by sending it back through the source connection.
+        //
+        // Ordering note: the forwarded wl_keyboard.key arrives at the guest
+        // *before* the ack_key reaches the host, because out_buffer is sent
+        // first (above). This is intentional and safe: Exo holds the key in
+        // pending_key_acks_ with a 1000 ms TTL, so the ack always arrives well
+        // within the window. The C sommelier exhibits the same ordering.
         let mut reverse_out_fds = Vec::new();
         let reverse_queue = match direction {
             Direction::ClientToHost => &mut self.ctx.host_to_client_queue,

@@ -31,13 +31,18 @@ limitations under the License.
 
 use xkbcommon::xkb;
 
-/// Modifier bitmask constants matching the sommelier C convention.
+/// Modifier bitmask constants.
+///
+/// These bit positions follow the sommelier C convention, not X11's `Mod*Mask`
+/// values. They are used only internally for accelerator matching.
 pub const CONTROL_MASK: u32 = 1 << 0;
 pub const ALT_MASK: u32 = 1 << 1;
 pub const SHIFT_MASK: u32 = 1 << 2;
+pub const SUPER_MASK: u32 = 1 << 3;
 
 // We need xkb_keysym_to_lower for case-insensitive keysym matching.
-// The xkbcommon-rs crate does not expose this, so import directly.
+// The xkbcommon-rs crate does not expose this, so we link directly.
+// TODO: remove this FFI shim if xkbcommon-rs upstream adds xkb_keysym_to_lower.
 #[link(name = "xkbcommon")]
 extern "C" {
     #[link_name = "xkb_keysym_to_lower"]
@@ -88,6 +93,7 @@ pub fn parse_accelerator(token: &str) -> Result<Accelerator, ParseError> {
             "<control>" => modifiers |= CONTROL_MASK,
             "<alt>" => modifiers |= ALT_MASK,
             "<shift>" => modifiers |= SHIFT_MASK,
+            "<super>" => modifiers |= SUPER_MASK,
             _ => return Err(ParseError::InvalidModifier(token.to_string())),
         }
         token = &token[end_idx + 1..];
@@ -176,5 +182,13 @@ mod tests {
             parse_accelerators("<Control><Alt>"),
             Err(ParseError::InvalidKeysym("Empty keysym".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_super_modifier() {
+        let list = parse_accelerators("<Super>space").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].modifiers, SUPER_MASK);
+        assert_eq!(list[0].symbol, xkb::keysyms::KEY_space);
     }
 }

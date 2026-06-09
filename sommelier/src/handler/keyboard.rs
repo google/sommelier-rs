@@ -24,12 +24,16 @@ limitations under the License.
 //! runs the accelerator, key is not forwarded to guest). All other keys are
 //! acked as `HANDLED` (guest receives the key, host skips the accelerator).
 //!
-//! See `docs/keyboard-shortcut-inhibition.md` for the full protocol flow.
+//! See `docs/KEYBOARD_SHORTCUT_INHIBITION.md` for the full protocol flow.
 
 use crate::protocols::wayland::wl_keyboard;
 use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
 use xkbcommon::xkb;
+
+/// `wl_keyboard.key` state values (Wayland spec §wl_keyboard.key).
+const WL_KEY_PRESSED: u32 = 1;
+const WL_KEY_RELEASED: u32 = 0;
 
 /// A read-only view of a shared-memory fd mapped into the process address space.
 ///
@@ -312,14 +316,14 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 
-        if state == 1 {
+        if state == WL_KEY_PRESSED {
             // Key pressed: check if this is a host accelerator.
             if self.is_host_accelerator(&ctx.accelerators, key) {
                 action = Action::Drop;
                 handled = false;
                 self.dropped_keys.insert(key);
             }
-        } else if state == 0 {
+        } else if state == WL_KEY_RELEASED {
             // Key released: if we dropped the press, drop the release too
             // to avoid stuck-key state in the guest.
             if self.dropped_keys.remove(&key) {
@@ -328,9 +332,13 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             }
         }
 
-        // Send ack_key if we have an extended keyboard for this keyboard.
-        // This is what actually controls whether the host runs the accelerator.
-        self.send_ack_key(ctx, host_keyboard_id, serial, handled);
+        // Send ack_key only for press events, matching the C sommelier
+        // reference implementation. Exo only queues presses in
+        // pending_key_acks_; sending acks for releases would be a no-op
+        // against non-existent serials but is deliberately avoided for clarity.
+        if state == WL_KEY_PRESSED {
+            self.send_ack_key(ctx, host_keyboard_id, serial, handled);
+        }
 
         action
     }
@@ -359,12 +367,37 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             if state.mod_name_is_active("Shift", components) {
                 self.modifiers |= crate::accelerator::SHIFT_MASK;
             }
+            if state.mod_name_is_active("Mod4", components) {
+                self.modifiers |= crate::accelerator::SUPER_MASK;
+            }
+        }
+        Action::Forward
+    }
+
+    /// Clean up when the guest destroys the wl_keyboard object.
+    ///
+    /// Sends `zcr_extended_keyboard_v1.destroy` to the host and removes the
+    /// keyboard→extended-keyboard mapping. Without this, re-binding a keyboard
+    /// (e.g. after a seat change) would fail silently because
+    /// `bind_extended_keyboard` guards with `contains_key`.
+    fn on_release(&mut self, ctx: &mut Context) -> Action {
+        let host_keyboard_id = ctx.last_sender_id;
+        if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
+            // zcr_extended_keyboard_v1.destroy is opcode 0, no payload.
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&host_extended_id.to_ne_bytes());
+            let word2 = 8u32 << 16; // len=8, opcode=0 (destroy)
+            msg.extend_from_slice(&word2.to_ne_bytes());
+            ctx.client_to_host_queue.push((msg, Vec::new()));
+            log::debug!(
+                "Destroyed extended keyboard: host_extended_id={} for host_keyboard_id={}",
+                host_extended_id,
+                host_keyboard_id
+            );
         }
         Action::Forward
     }
 }
-
-
 
 // Empty impls for keyboard extension protocol handlers.
 // We don't receive requests/events on these; we only send ack_key.
@@ -559,6 +592,66 @@ mod tests {
         assert!(
             handler.state.is_some(),
             "XKB state must be initialized after keymap load"
+        );
+    }
+
+    #[test]
+    fn on_release_destroys_extended_keyboard_and_cleans_map() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+
+        // Simulate a bound extended keyboard (host_keyboard_id=10 → host_extended_id=50).
+        ctx.keyboard_to_extended_keyboard.insert(10, 50);
+        ctx.last_sender_id = 10;
+
+        let action = handler.on_release(&mut ctx);
+        assert_eq!(action, Action::Forward);
+
+        // Map entry must be removed so re-binding is possible.
+        assert!(
+            !ctx.keyboard_to_extended_keyboard.contains_key(&10),
+            "extended keyboard map must be cleared after release"
+        );
+
+        // destroy message must have been queued to the host.
+        assert_eq!(ctx.client_to_host_queue.len(), 1, "destroy must be queued");
+        let (msg, _) = &ctx.client_to_host_queue[0];
+        // Message: [sender_id(4)] [size_opcode(4)]  — opcode 0, len 8.
+        let sender = u32::from_ne_bytes(msg[0..4].try_into().unwrap());
+        let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
+        assert_eq!(sender, 50, "destroy must target host_extended_id");
+        assert_eq!(word2 >> 16, 8, "message length must be 8");
+        assert_eq!(word2 & 0xFFFF, 0, "opcode must be 0 (destroy)");
+    }
+
+    #[test]
+    fn bind_extended_keyboard_is_idempotent() {
+        let handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        ctx.host_keyboard_extension_id = Some(99);
+
+        // First call: should send get_extended_keyboard.
+        handler.bind_extended_keyboard(&mut ctx, 10);
+        assert_eq!(ctx.client_to_host_queue.len(), 1);
+
+        // Second call with the same host_keyboard_id: must not send again.
+        ctx.client_to_host_queue.clear();
+        handler.bind_extended_keyboard(&mut ctx, 10);
+        assert!(
+            ctx.client_to_host_queue.is_empty(),
+            "bind must be idempotent: no second get_extended_keyboard"
+        );
+    }
+
+    #[test]
+    fn is_host_accelerator_returns_false_without_xkb_state() {
+        let handler = KeyboardHandler::new(); // no keymap loaded
+        let accelerators =
+            crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        // Must degrade gracefully, not panic.
+        assert!(
+            !handler.is_host_accelerator(&accelerators, 30),
+            "should return false when XKB state is not initialised"
         );
     }
 }

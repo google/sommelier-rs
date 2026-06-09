@@ -44,6 +44,17 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             if !ctx.gpu_accel {
                 return Action::Drop;
             }
+            // Placeholder guest-ID scheme:
+            // Interfaces bound internally (not exposed to the guest) need a
+            // stable guest-ID so the shadow table can track them. We use a
+            // high-bit sentinel range per interface to guarantee they never
+            // collide with real client-allocated IDs (which start at 2 and
+            // grow monotonically upward from there):
+            //   0xFE00_0000 — zwp_linux_dmabuf_v1
+            //   0xFD00_0000 — wl_shm (internal bind)
+            //   0xFC00_0000 — zwp_text_input_manager_v1
+            //   0xFB00_0000 — zcr_text_input_extension_v1
+            //   0xFA00_0000 — zcr_keyboard_extension_v1
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_dmabuf_id = Some(host_id);
             let placeholder_guest_id = 0xFE00_0000 | host_id;
@@ -183,7 +194,10 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             let mut builder = MessageBuilder::new();
             builder.write_u32(name);
             builder.write_string(interface);
-            builder.write_u32(version);
+            // Cap to version 1: we only use ack_key (a v1 feature). This is
+            // defensive against future Exo versions adding breaking changes
+            // in v3+; peek_key (v2) is intentionally not handled.
+            builder.write_u32(version.min(1));
             builder.write_u32(host_id);
 
             let mut full_msg = Vec::new();

@@ -160,59 +160,44 @@ Chromium → guest opens a new tab. ✓
 
 ---
 
-## What sommelier-rs Must Implement
+## What Must Be Implemented
 
-### 1. Bind `zcr_keyboard_extension_v1` from host registry
+### 1. Bind `zcr_keyboard_extension_v1` from the host registry
 
-In `handler/registry.rs`, when the host advertises `zcr_keyboard_extension_v1`,
-store its host name/ID in `ctx.host_keyboard_extension_id`.
+When the host compositor advertises `zcr_keyboard_extension_v1` during the
+registry enumeration phase, the proxy must bind to it and retain a reference
+for later use.
 
-### 2. After keyboard creation, send `get_extended_keyboard`
+### 2. After keyboard creation, request `get_extended_keyboard`
 
-After a `wl_seat.get_keyboard` creates a host keyboard, immediately send:
+Once a `wl_seat.get_keyboard` creates a host-side keyboard object, the proxy
+must immediately send:
 ```
 zcr_keyboard_extension_v1.get_extended_keyboard(new_id, host_keyboard_id)
 ```
-This allocates a `zcr_extended_keyboard_v1` object and triggers
-`SetNeedKeyboardKeyAcks(true)` in Exo.
+This allocates a `zcr_extended_keyboard_v1` object on the host and enables
+ack mode for that keyboard (i.e. Exo begins holding accelerators pending
+acknowledgement rather than processing them immediately).
 
-### 3. Track serials in `on_key` and send `ack_key`
+### 3. Acknowledge each key event with `ack_key`
 
-In `handler/keyboard.rs`, `on_key` currently ignores the `_serial` parameter.
-We need to:
-1. Capture the host serial from the `wl_keyboard.key` event.
-2. Determine if the key is in `ctx.accelerators` (i.e. host should handle it).
-3. Send `zcr_extended_keyboard_v1.ack_key(serial, handled_state)` to the host:
-   - `NOT_HANDLED (0)` if key is in `SOMMELIER_ACCELERATORS` → host runs accelerator
-   - `HANDLED (1)` otherwise → host skips accelerator, key forwarded to guest
+For every `wl_keyboard.key` event received from the host, the proxy must:
+1. Capture the serial from the event.
+2. Determine whether the key combo is in the configured accelerator list
+   (keys the **host** should handle).
+3. Send `zcr_extended_keyboard_v1.ack_key(serial, handled_state)` back to
+   the host:
+   - `NOT_HANDLED (0)` if the key is in the accelerator list → host runs
+     its accelerator action.
+   - `HANDLED (1)` otherwise → host skips the accelerator, key is
+     forwarded to the guest application.
 
-### 4. Remove or retain `zwp_keyboard_shortcuts_inhibitor_v1` approach
+### 4. Retain or remove the `zwp_keyboard_shortcuts_inhibitor_v1` path
 
-The auto-inhibit logic (`on_enter`/`on_leave` creating inhibitors) can be removed
-once `zcr_keyboard_extension_v1` acks are working, since the inhibitor does nothing
-in practice. Alternatively keep it as a belt-and-suspenders measure since it is
+The auto-inhibitor created on focus enter/leave is effectively a no-op in
+Chrome OS Exo (see above). It can be removed once `zcr_keyboard_extension_v1`
+acks are working, or kept as a belt-and-suspenders measure since it is
 harmless.
-
----
-
-## Evidence from Runtime Logs
-
-When Ctrl+T was pressed during testing (RUST_LOG=trace):
-
-```
-[HostToClient] wl_keyboard:3 (key - Ctrl+T)
-  on_key debug: found internal inhibitor host_inhibitor_id=113, active=true
-  → translated (24 bytes, 0 fds)   ← key forwarded to guest ✓
-
-[HostToClient] xdg_toplevel:0      ← host reconfigures window (focus stolen!)
-[HostToClient] xdg_surface:0
-[HostToClient] wl_keyboard:2       ← keyboard leave: focus gone
-  on_leave auto-inhibit cleanup
-```
-
-The key IS forwarded to the guest Chromium. But Exo simultaneously processes
-Ctrl+T as a Chrome accelerator (because ack mode is not enabled), opening a new
-tab and stealing focus away from the guest window.
 
 ---
 
