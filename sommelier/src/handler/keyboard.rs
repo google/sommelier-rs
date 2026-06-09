@@ -44,7 +44,7 @@ const WL_KEYMAP_FORMAT_XKB_V1: u32 = 1;
 /// - `new`: calls `mmap(MAP_SHARED, PROT_READ)` and stores the pointer + length.
 /// - `as_bytes`: constructs a slice; valid because the mapping covers exactly `len` bytes.
 /// - `Drop`: calls `munmap`; the pointer and length are never mutated after construction.
-pub struct MmapView {
+pub(crate) struct MmapView {
     ptr: std::ptr::NonNull<std::ffi::c_void>,
     len: usize,
 }
@@ -52,7 +52,7 @@ pub struct MmapView {
 impl MmapView {
     /// Map `len` bytes from `fd` at offset 0 as read-only shared memory.
     /// Returns `None` if `len` is zero or if `mmap` fails.
-    pub fn from_fd(fd: std::os::unix::io::RawFd, len: usize) -> Option<Self> {
+    pub(crate) fn from_fd(fd: std::os::unix::io::RawFd, len: usize) -> Option<Self> {
         use nix::sys::mman::{mmap, MapFlags, ProtFlags};
         use std::os::unix::io::BorrowedFd;
 
@@ -67,7 +67,7 @@ impl MmapView {
     }
 
     /// View the mapped region as a byte slice.
-    pub fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         // Safety: ptr points to `self.len` readable bytes for the lifetime of
         // self (mapping is alive until Drop); no other writer exists (PROT_READ).
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr() as *const u8, self.len) }
@@ -93,11 +93,12 @@ pub struct KeyboardHandler {
     dropped_keys: std::collections::HashSet<u32>,
 }
 
-// xkb::Context, Keymap, and State are not Send/Sync, but we only access them
-// from the single-threaded client task. The tokio runtime requires Send for
+// xkb::Context, Keymap, and State are not Send, but we only access them from
+// the single-threaded client task. The tokio runtime requires Send for
 // task-spawned futures, so we provide the guarantee manually.
+// NOTE: Sync is intentionally NOT implemented — xkb::State must never be
+// accessed concurrently from multiple threads.
 unsafe impl Send for KeyboardHandler {}
-unsafe impl Sync for KeyboardHandler {}
 
 impl KeyboardHandler {
     pub fn new() -> Self {
@@ -113,28 +114,35 @@ impl KeyboardHandler {
     /// Check if the pressed key matches any configured host accelerators.
     fn is_host_accelerator(&self, accelerators: &[crate::accelerator::Accelerator], key: u32) -> bool {
         let Some(state) = &self.state else { return false; };
-        let Some(keymap) = &self.keymap else { return false; };
 
         let xkb_keycode = xkb::Keycode::new(key + 8);
-        let syms = keymap.key_get_syms_by_level(xkb_keycode, state.key_get_layout(xkb_keycode), 0);
-
-        // Only match keys that resolve to exactly one keysym. Keys producing
-        // 0 or 2+ symbols are ambiguous and intentionally excluded from
-        // accelerator matching to avoid spurious intercepts.
-        if syms.len() == 1 {
-            let lower_sym = crate::accelerator::keysym_to_lower(syms[0].raw());
-            for acc in accelerators {
-                if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
-                    log::debug!("Accelerator match: key={}, modifiers={:#x}, sym={:#x}", key, self.modifiers, lower_sym);
-                    return true;
-                }
+        // Use key_get_one_sym so that the full XKB state (including active shift
+        // level) is considered. key_get_syms_by_level at level 0 would always
+        // return the unshifted symbol, causing <Shift>-modified accelerators to
+        // fail to match when Shift is held.
+        let sym = state.key_get_one_sym(xkb_keycode);
+        if sym.raw() == xkb::keysyms::KEY_NoSymbol {
+            return false;
+        }
+        let lower_sym = crate::accelerator::keysym_to_lower(sym.raw());
+        for acc in accelerators {
+            if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
+                log::trace!("Accelerator match: key={}, modifiers={:#x}, sym={:#x}", key, self.modifiers, lower_sym);
+                return true;
             }
         }
         false
     }
 
     /// Lazily bind zcr_keyboard_extension_v1.get_extended_keyboard.
-    fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: HostId) {
+    ///
+    /// This is called from `on_enter` (rather than `wl_seat.get_keyboard`) because
+    /// the host keyboard ID (`ctx.last_sender_id` in a host→client event) is only
+    /// known once we process a host event — `get_keyboard` is a client→host request
+    /// and at that point we only have the guest keyboard ID. `on_enter` is always
+    /// sent by the host before any `wl_keyboard.key` event, so this is safe:
+    /// the extended keyboard will be bound before the first key event.
+    pub(crate) fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
             if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
                 let host_extended_id = HostId(ctx.shadow_table.allocate_host_id());
@@ -151,7 +159,9 @@ impl KeyboardHandler {
                 let mut msg = Vec::new();
                 msg.extend_from_slice(&extension_host_id.0.to_ne_bytes());
                 let len = (builder.payload.len() + 8) as u32;
-                let word2 = len << 16; // opcode 0: get_extended_keyboard
+                // Opcode 0: get_extended_keyboard. Explicit `| 0u32` for consistency
+                // with send_ack_key which uses `| 1u32`; avoids copy-paste mistakes.
+                let word2 = (len << 16) | 0u32;
                 msg.extend_from_slice(&word2.to_ne_bytes());
                 msg.extend_from_slice(&builder.payload);
                 ctx.client_to_host_queue.push((msg, Vec::new()));
@@ -165,21 +175,39 @@ impl KeyboardHandler {
     }
 
     /// Send zcr_extended_keyboard_v1.ack_key to the host.
+    ///
+    /// If the protocol is available (`host_keyboard_extension_id` is set) but the
+    /// extended keyboard hasn't been bound for this keyboard ID yet, that indicates
+    /// a key event arrived before `on_enter` was processed. This should not happen
+    /// in normal Wayland flow (Exo always sends `on_enter` before `key`), so we
+    /// emit a warning to aid debugging if it ever occurs.
     fn send_ack_key(&self, ctx: &mut Context, host_keyboard_id: HostId, serial: u32, handled: bool) {
-        if let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) {
-            let handled_val: u32 = if handled { 1 } else { 0 };
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(serial);
-            builder.write_u32(handled_val);
-
-            let mut msg = Vec::new();
-            msg.extend_from_slice(&host_extended_id.0.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 1u32; // opcode 1: ack_key
-            msg.extend_from_slice(&word2.to_ne_bytes());
-            msg.extend_from_slice(&builder.payload);
-            ctx.client_to_host_queue.push((msg, Vec::new()));
+        if ctx.host_keyboard_extension_id.is_none() {
+            // Protocol not available on this compositor; silently skip.
+            return;
         }
+        let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) else {
+            log::warn!(
+                "ack_key: no extended keyboard bound for host_keyboard_id={}; \
+                 key event arrived before on_enter? serial={}, handled={}",
+                host_keyboard_id.0,
+                serial,
+                handled
+            );
+            return;
+        };
+        let handled_val: u32 = if handled { 1 } else { 0 };
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(serial);
+        builder.write_u32(handled_val);
+
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&host_extended_id.0.to_ne_bytes());
+        let len = (builder.payload.len() + 8) as u32;
+        let word2 = (len << 16) | 1u32; // opcode 1: ack_key
+        msg.extend_from_slice(&word2.to_ne_bytes());
+        msg.extend_from_slice(&builder.payload);
+        ctx.client_to_host_queue.push((msg, Vec::new()));
     }
 }
 
@@ -197,6 +225,12 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     ) -> Action {
         // Only handle XKB_V1 format keymaps.
         if format != WL_KEYMAP_FORMAT_XKB_V1 {
+            return Action::Forward;
+        }
+
+        // A zero-size keymap is malformed; mmap(len=0) is UB per POSIX.
+        if size == 0 {
+            log::warn!("on_keymap: received zero-size keymap from host, ignoring");
             return Action::Forward;
         }
 
@@ -238,7 +272,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         _keys: &[u8],
     ) -> Action {
         // on_enter is a host→client event: last_sender_id is the host keyboard ID.
-        let host_keyboard_id = HostId(ctx.last_sender_id);
+        let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
@@ -278,7 +312,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
     fn on_leave(&mut self, ctx: &mut Context, _serial: u32, surface: u32) -> Action {
         // on_leave is a host→client event: last_sender_id is the host keyboard ID.
-        let host_keyboard_id = HostId(ctx.last_sender_id);
+        let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
@@ -321,7 +355,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         state: u32,
     ) -> Action {
         // on_key is a host→client event: last_sender_id is the host keyboard ID.
-        let host_keyboard_id = HostId(ctx.last_sender_id);
+        let host_keyboard_id = HostId::from_event_sender(ctx);
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 
@@ -393,7 +427,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     fn on_release(&mut self, ctx: &mut Context) -> Action {
         // Translate guest ID → host ID. Returns None for unknown keyboards
         // (e.g. keyboards that never received an on_enter event).
-        let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId(ctx.last_sender_id)) else {
+        let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId::from_request_sender(ctx)) else {
             return Action::Forward;
         };
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
@@ -455,6 +489,15 @@ mod tests {
     }
 
     /// Find the evdev keycode for a given keysym in the keymap.
+    ///
+    /// # Note on shift-level lookup
+    /// This helper uses `key_get_syms_by_level(..., level=0)` which returns the
+    /// **unshifted** (base level) symbol for each key. This is intentional for
+    /// the purposes of *finding* a keycode given a base keysym: tests using this
+    /// helper should not involve shifted accelerators (e.g. `<Shift>A`), since
+    /// such tests would need a different lookup strategy. The production code uses
+    /// `key_get_one_sym` which correctly accounts for the active shift level at
+    /// runtime.
     fn find_keycode(keymap: &xkb::Keymap, target: u32) -> u32 {
         let min = keymap.min_keycode().raw();
         let max = keymap.max_keycode().raw();
@@ -480,7 +523,9 @@ mod tests {
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
-        // Set up extended keyboard tracking so ack_key is sent
+        // Set up extended keyboard tracking so ack_key is sent.
+        // host_keyboard_extension_id must be Some to enable the protocol path.
+        ctx.host_keyboard_extension_id = Some(HostId(99));
         ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
         ctx.last_sender_id = 0;
 
@@ -513,6 +558,7 @@ mod tests {
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
+        ctx.host_keyboard_extension_id = Some(HostId(99));
         ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
         ctx.last_sender_id = 0;
 
@@ -543,6 +589,7 @@ mod tests {
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
+        ctx.host_keyboard_extension_id = Some(HostId(99));
         ctx.keyboard_to_extended_keyboard.insert(HostId(0), HostId(50));
         ctx.last_sender_id = 0;
 
@@ -676,5 +723,64 @@ mod tests {
             !handler.is_host_accelerator(&accelerators, 30),
             "should return false when XKB state is not initialised"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // New tests added by code review fixes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn on_keymap_ignores_zero_size() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        // A zero-size keymap must be rejected gracefully (mmap(len=0) is UB).
+        // fd=0 (stdin) won't be mmap'd because the size check fires first.
+        let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, 0, 0 /* size=0 */);
+        assert_eq!(action, Action::Forward, "zero-size keymap must forward, not panic");
+        assert!(handler.keymap.is_none(), "keymap must not be set after zero-size event");
+    }
+
+    #[test]
+    fn on_keymap_ignores_unknown_format() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        // Format 0 = WL_KEYMAP_FORMAT_NO_KEYMAP; forward without loading.
+        let action = handler.on_keymap(&mut ctx, 0 /* format=no_keymap */, 0, 100);
+        assert_eq!(action, Action::Forward);
+        assert!(handler.keymap.is_none());
+    }
+
+    #[test]
+    fn send_ack_key_warns_when_protocol_bound_but_keyboard_not_registered() {
+        // Regression: if host_keyboard_extension_id is Some (protocol available)
+        // but the keyboard hasn't been registered via on_enter yet, send_ack_key
+        // must not panic or silently send a garbage ack. No queue entry expected.
+        let handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        ctx.host_keyboard_extension_id = Some(HostId(99)); // protocol bound
+        // keyboard_to_extended_keyboard is empty (on_enter not yet received)
+
+        handler.send_ack_key(&mut ctx, HostId(10), 1, true);
+
+        assert!(
+            ctx.client_to_host_queue.is_empty(),
+            "no ack_key must be queued when keyboard is not yet registered"
+        );
+    }
+
+    #[test]
+    fn opcode_encoding_get_extended_keyboard_is_zero() {
+        // Regression: get_extended_keyboard uses opcode 0. Verify the wire
+        // message encodes it correctly (not accidentally a non-zero opcode).
+        let handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        ctx.host_keyboard_extension_id = Some(HostId(99));
+
+        handler.bind_extended_keyboard(&mut ctx, HostId(10));
+        assert_eq!(ctx.client_to_host_queue.len(), 1);
+        let (msg, _) = &ctx.client_to_host_queue[0];
+        let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
+        let opcode = word2 & 0xFFFF;
+        assert_eq!(opcode, 0, "get_extended_keyboard must use opcode 0, got {}", opcode);
     }
 }

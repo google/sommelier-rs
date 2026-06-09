@@ -189,8 +189,11 @@ For every `wl_keyboard.key` event received from the host, the proxy must:
    the host:
    - `NOT_HANDLED (0)` if the key is in the accelerator list → host runs
      its accelerator action.
-   - `HANDLED (1)` otherwise → host skips the accelerator, key is
-     forwarded to the guest application.
+   - `HANDLED (1)` otherwise → host skips the accelerator. The guest
+     application processes the key event it already received (the
+     `wl_keyboard.key` is forwarded to the guest *before* the `ack_key`
+     reaches the host; Exo holds the accelerator in `pending_key_acks_`
+     until the ack or its 1000 ms TTL fires).
 
 ### 4. Retain or remove the `zwp_keyboard_shortcuts_inhibitor_v1` path
 
