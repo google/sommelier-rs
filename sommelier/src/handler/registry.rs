@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 use crate::protocols::fractional_scale_v1::ALLOWED_INTERFACES as FRACTIONAL_SCALE_ALLOWED;
+use crate::protocols::keyboard_shortcuts_inhibit_unstable_v1::ALLOWED_INTERFACES as SHORTCUTS_INHIBIT_ALLOWED;
 use crate::protocols::linux_dmabuf_v1::ALLOWED_INTERFACES as DMABUF_ALLOWED;
 use crate::protocols::text_input_unstable_v3::ALLOWED_INTERFACES as TEXT_INPUT_ALLOWED;
 use crate::protocols::viewporter::ALLOWED_INTERFACES as VIEWPORTER_ALLOWED;
@@ -166,6 +167,37 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             return Action::Drop;
+        } else if interface == "zcr_keyboard_extension_v1" {
+            // Bind zcr_keyboard_extension_v1 internally. This is a ChromeOS-
+            // specific protocol that enables the ack-key mechanism for
+            // controlling host accelerator processing. Not exposed to the guest.
+            let host_id = ctx.shadow_table.allocate_host_id();
+            ctx.host_keyboard_extension_id = Some(host_id);
+            let placeholder_guest_id = 0xFA00_0000 | host_id;
+            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
+            ctx.shadow_table.track_interface(
+                placeholder_guest_id,
+                "zcr_keyboard_extension_v1".to_string(),
+            );
+
+            let registry_host_id = ctx.last_sender_id;
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(name);
+            builder.write_string(interface);
+            builder.write_u32(version);
+            builder.write_u32(host_id);
+
+            let mut full_msg = Vec::new();
+            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
+            full_msg.extend_from_slice(&word2.to_ne_bytes());
+            full_msg.extend_from_slice(&builder.payload);
+
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            log::info!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
+
+            return Action::Drop;
         } else if interface == "wl_shm" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_shm_id = Some(host_id);
@@ -200,6 +232,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             || TEXT_INPUT_ALLOWED.contains(&interface.as_str())
             || (XDG_DECORATION_ALLOWED.contains(&interface.as_str()) && ctx.xdg_decoration)
             || FRACTIONAL_SCALE_ALLOWED.contains(&interface.as_str())
+            || SHORTCUTS_INHIBIT_ALLOWED.contains(&interface.as_str())
             || interface == "wl_data_device_manager";
 
         if !is_allowed {
@@ -252,6 +285,11 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         ctx.shadow_table.map_id(*guest_new_id, host_new_id);
         ctx.shadow_table
             .track_interface(*guest_new_id, interface.clone());
+
+        // Track the host-side shortcuts inhibit manager so we can reference it.
+        if interface == "zwp_keyboard_shortcuts_inhibit_manager_v1" {
+            ctx.host_keyboard_shortcuts_inhibit_manager_id = Some(host_new_id);
+        }
 
         // We need to send the bind request to the host.
         // The sender is the registry object.

@@ -67,7 +67,7 @@ impl SommelierHandler {
             extended_text_input_v1: crate::handler::text_input::ExtendedTextInputV1Handler,
             text_input_manager_v3: crate::handler::text_input::TextInputManagerV3Handler,
             text_input_v3: crate::handler::text_input::TextInputV3Handler,
-            keyboard: crate::handler::keyboard::KeyboardHandler,
+            keyboard: crate::handler::keyboard::KeyboardHandler::new(),
             seat: crate::handler::seat::SeatHandler,
         }
     }
@@ -153,6 +153,10 @@ impl Client {
             protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::fractional_scale_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::keyboard_shortcuts_inhibit_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::keyboard_shortcuts_inhibit_unstable_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::keyboard_extension_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -186,6 +190,10 @@ impl Client {
             protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::fractional_scale_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::keyboard_shortcuts_inhibit_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::keyboard_shortcuts_inhibit_unstable_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::keyboard_extension_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -348,6 +356,34 @@ impl Client {
         let mut fds_to_close: std::collections::HashSet<std::os::unix::io::RawFd> =
             std::collections::HashSet::new();
         fds_to_close.extend(out_fds.iter());
+
+        // Bidirectional queue: when processing events in one direction, the
+        // handler may queue messages for the OPPOSITE direction. For example,
+        // processing a host→client wl_keyboard.key event queues an ack_key
+        // message back to the host via client_to_host_queue. Flush that queue
+        // now by sending it back through the source connection.
+        let mut reverse_out_fds = Vec::new();
+        let reverse_queue = match direction {
+            Direction::ClientToHost => &mut self.ctx.host_to_client_queue,
+            Direction::HostToClient => &mut self.ctx.client_to_host_queue,
+        };
+        let mut reverse_out_buf = Vec::new();
+        for (p_data, p_fds) in reverse_queue.drain(..) {
+            log::debug!(
+                "  -> adding reverse queued message ({} bytes, {} fds)",
+                p_data.len(),
+                p_fds.len()
+            );
+            reverse_out_buf.extend_from_slice(&p_data);
+            reverse_out_fds.extend(p_fds);
+        }
+        if !reverse_out_buf.is_empty()
+            && conn.send(&reverse_out_buf, &reverse_out_fds).await.is_err()
+        {
+            success = false;
+        }
+        fds_to_close.extend(reverse_out_fds.iter());
+
         fds_to_close.extend(conn.read_fds.iter().take(fd_offset));
 
         for fd in fds_to_close {
@@ -428,6 +464,20 @@ impl protocols::xdg_decoration_unstable_v1::ProtocolHandler for SommelierHandler
 // Fractional Scale Protocol
 protocols::fractional_scale_v1::impl_sommelier_delegates!(SommelierHandler, {});
 impl protocols::fractional_scale_v1::ProtocolHandler for SommelierHandler {}
+
+// Keyboard Shortcuts Inhibit Protocol
+protocols::keyboard_shortcuts_inhibit_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {
+    zwp_keyboard_shortcuts_inhibit_manager_v1: keyboard,
+    zwp_keyboard_shortcuts_inhibitor_v1: keyboard
+});
+impl protocols::keyboard_shortcuts_inhibit_unstable_v1::ProtocolHandler for SommelierHandler {}
+
+// Keyboard Extension Protocol (ChromeOS-specific)
+protocols::keyboard_extension_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {
+    zcr_keyboard_extension_v1: keyboard,
+    zcr_extended_keyboard_v1: keyboard
+});
+impl protocols::keyboard_extension_unstable_v1::ProtocolHandler for SommelierHandler {}
 
 pub async fn run(
     display: &str,

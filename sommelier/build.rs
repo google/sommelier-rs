@@ -51,6 +51,14 @@ fn main() {
             "fractional_scale_v1",
             "../third_party/protocols/fractional-scale-v1.xml",
         ),
+        (
+            "keyboard_extension_unstable_v1",
+            "../third_party/protocols/keyboard-extension-unstable-v1.xml",
+        ),
+        (
+            "keyboard_shortcuts_inhibit_unstable_v1",
+            "../third_party/protocols/keyboard-shortcuts-inhibit-unstable-v1.xml",
+        ),
     ];
 
     for (name, path_str) in &protocols {

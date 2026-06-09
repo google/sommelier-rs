@@ -26,6 +26,8 @@ impl wl_seat::WlSeatHandler for SeatHandler {
         ctx.keyboard_to_seat.insert(id, guest_seat_id);
         ctx.shadow_table
             .track_interface(id, "wl_keyboard".to_string());
+        // Note: zcr_keyboard_extension_v1.get_extended_keyboard is sent lazily
+        // from keyboard.rs on_enter, where the host keyboard ID is known.
         Action::Forward
     }
 }

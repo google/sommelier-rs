@@ -211,8 +211,17 @@ pub struct TextInputState {
     pub text_change_cause: u32,
 }
 
+/// State for a guest-created keyboard shortcuts inhibitor.
+#[derive(Debug, Clone)]
+pub struct ShortcutInhibitorState {
+    pub guest_surface_id: u32,
+    pub guest_seat_id: u32,
+    pub active: bool,
+}
+
 pub struct Context {
     pub shadow_table: ShadowTable,
+    pub shortcut_inhibitors: HashMap<u32, ShortcutInhibitorState>,
     pub pools: HashMap<u32, Arc<PoolState>>,
     pub buffers: HashMap<u32, BufferState>,
     pub surfaces: HashMap<u32, SurfaceState>,
@@ -228,6 +237,14 @@ pub struct Context {
     pub host_shm_id: Option<u32>,
     pub host_text_input_manager_v1_id: Option<u32>,
     pub host_text_input_extension_v1_id: Option<u32>,
+    /// Host-side zcr_keyboard_extension_v1 object ID (bound internally).
+    pub host_keyboard_extension_id: Option<u32>,
+    /// Host-side zwp_keyboard_shortcuts_inhibit_manager_v1 object ID.
+    pub host_keyboard_shortcuts_inhibit_manager_id: Option<u32>,
+    /// Maps host_keyboard_id → host_extended_keyboard_id for ack_key.
+    pub keyboard_to_extended_keyboard: HashMap<u32, u32>,
+    /// Parsed SOMMELIER_ACCELERATORS: keys the host should handle.
+    pub accelerators: Vec<crate::accelerator::Accelerator>,
     pub supported_formats: HashSet<u32>,
     pub host_globals: HashMap<String, u32>,
     pub pending_params: HashMap<u32, Vec<PendingParam>>,
@@ -247,8 +264,12 @@ impl Context {
             }
         };
 
+        let accelerators_env = std::env::var("SOMMELIER_ACCELERATORS").unwrap_or_default();
+        let accelerators = crate::accelerator::parse_accelerators(&accelerators_env);
+
         Self {
             shadow_table: ShadowTable::new(),
+            shortcut_inhibitors: HashMap::new(),
             pools: HashMap::new(),
             buffers: HashMap::new(),
             surfaces: HashMap::new(),
@@ -264,6 +285,10 @@ impl Context {
             host_shm_id: None,
             host_text_input_manager_v1_id: None,
             host_text_input_extension_v1_id: None,
+            host_keyboard_extension_id: None,
+            host_keyboard_shortcuts_inhibit_manager_id: None,
+            keyboard_to_extended_keyboard: HashMap::new(),
+            accelerators,
             supported_formats: HashSet::new(),
             host_globals: HashMap::new(),
             pending_params: HashMap::new(),

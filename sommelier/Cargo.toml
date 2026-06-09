@@ -39,6 +39,9 @@ xkbcommon = "0.8.0"
 [build-dependencies]
 wayland_codegen = { path = "../wayland_codegen" }
 
+[dev-dependencies]
+tempfile = "3"
+
 [[bin]]
 name = "sommelier"
 path = "src/main.rs"

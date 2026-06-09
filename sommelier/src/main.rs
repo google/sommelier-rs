@@ -24,6 +24,7 @@ mod state;
 mod virtwl;
 mod virtwl_channel;
 mod wire;
+mod accelerator;
 
 mod protocols {
     include!(concat!(env!("OUT_DIR"), "/wayland_protocol.rs"));
@@ -47,6 +48,14 @@ mod protocols {
         "/xdg_decoration_unstable_v1_protocol.rs"
     ));
     include!(concat!(env!("OUT_DIR"), "/fractional_scale_v1_protocol.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/keyboard_extension_unstable_v1_protocol.rs"
+    ));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/keyboard_shortcuts_inhibit_unstable_v1_protocol.rs"
+    ));
 }
 
 #[derive(Parser, Debug)]
