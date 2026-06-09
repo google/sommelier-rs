@@ -23,7 +23,7 @@ use crate::protocols::wayland::wl_shm;
 use crate::protocols::wayland::ALLOWED_INTERFACES as WL_ALLOWED;
 use crate::protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES as XDG_DECORATION_ALLOWED;
 use crate::protocols::xdg_shell::ALLOWED_INTERFACES as XDG_ALLOWED;
-use crate::state::{Context, HostId};
+use crate::state::{sentinel, Context, HostId};
 use crate::wire::{Action, MessageBuilder};
 use log::error;
 
@@ -44,20 +44,9 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             if !ctx.gpu_accel {
                 return Action::Drop;
             }
-            // Placeholder guest-ID scheme:
-            // Interfaces bound internally (not exposed to the guest) need a
-            // stable guest-ID so the shadow table can track them. We use a
-            // high-bit sentinel range per interface to guarantee they never
-            // collide with real client-allocated IDs (which start at 2 and
-            // grow monotonically upward from there):
-            //   0xFE00_0000 — zwp_linux_dmabuf_v1
-            //   0xFD00_0000 — wl_shm (internal bind)
-            //   0xFC00_0000 — zwp_text_input_manager_v1
-            //   0xFB00_0000 — zcr_text_input_extension_v1
-            //   0xFA00_0000 — zcr_keyboard_extension_v1
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_dmabuf_id = Some(host_id);
-            let placeholder_guest_id = 0xFE00_0000 | host_id;
+            let placeholder_guest_id = sentinel::DMABUF | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table
                 .track_interface(placeholder_guest_id, "zwp_linux_dmabuf_v1".to_string());
@@ -104,7 +93,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "zwp_text_input_manager_v1" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_text_input_manager_v1_id = Some(host_id);
-            let placeholder_guest_id = 0xFC00_0000 | host_id;
+            let placeholder_guest_id = sentinel::TEXT_INPUT_MANAGER_V1 | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table.track_interface(
                 placeholder_guest_id,
@@ -152,7 +141,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         } else if interface == "zcr_text_input_extension_v1" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_text_input_extension_v1_id = Some(host_id);
-            let placeholder_guest_id = 0xFB00_0000 | host_id;
+            let placeholder_guest_id = sentinel::TEXT_INPUT_EXTENSION_V1 | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table.track_interface(
                 placeholder_guest_id,
@@ -183,7 +172,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             // controlling host accelerator processing. Not exposed to the guest.
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_keyboard_extension_id = Some(HostId(host_id));
-            let placeholder_guest_id = 0xFA00_0000 | host_id;
+            let placeholder_guest_id = sentinel::KEYBOARD_EXTENSION | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table.track_interface(
                 placeholder_guest_id,
@@ -194,10 +183,9 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             let mut builder = MessageBuilder::new();
             builder.write_u32(name);
             builder.write_string(interface);
-            // Cap to version 1: we only use ack_key (a v1 feature). This is
-            // defensive against future Exo versions adding breaking changes
-            // in v3+; peek_key (v2) is intentionally not handled.
-            builder.write_u32(version.min(1));
+            // Bind at v1: we only need ack_key. peek_key (added in v2) is
+            // intentionally not used.
+            builder.write_u32(1);
             builder.write_u32(host_id);
 
             let mut full_msg = Vec::new();
@@ -215,7 +203,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_shm_id = Some(host_id);
             // Map to a high-bit placeholder guest ID
-            let placeholder_guest_id = 0xFD00_0000 | host_id;
+            let placeholder_guest_id = sentinel::SHM | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table
                 .track_interface(placeholder_guest_id, "wl_shm".to_string());

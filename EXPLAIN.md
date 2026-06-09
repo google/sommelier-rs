@@ -1,5 +1,9 @@
 # Keyboard Shortcut Inhibition — Problem, Root Cause & Fix
 
+> **For the full protocol analysis, Exo source references, and implementation
+> spec, see [`sommelier/docs/KEYBOARD_SHORTCUT_INHIBITION.md`](sommelier/docs/KEYBOARD_SHORTCUT_INHIBITION.md).**
+> This document is a higher-level narrative of the problem and fix.
+
 ## The Problem
 
 When a Wayland app (e.g. Chromium) runs inside a ChromeOS Linux container via

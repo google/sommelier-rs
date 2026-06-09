@@ -27,16 +27,73 @@ use log::warn;
 /// Request handlers (client→host) receive guest IDs. Use [`ShadowTable::host_id_of`]
 /// to translate to the corresponding host ID. Passing a `GuestId` where a `HostId`
 /// is expected (or vice versa) is a **compile error**.
+///
+/// The inner field is intentionally `pub(crate)` so that arbitrary `GuestId(host_id)`
+/// constructions cannot be made from outside this crate, preserving the type invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GuestId(pub u32);
+pub struct GuestId(pub(crate) u32);
+
+impl GuestId {
+    /// Wrap the raw sender ID from a **client→host request** handler.
+    /// Only call this in handlers where `ctx.last_sender_id` is a guest ID.
+    #[inline]
+    pub(crate) fn from_request_sender(ctx: &Context) -> Self {
+        Self(ctx.last_sender_id)
+    }
+
+    /// Extract the raw u32 value (e.g. for wire serialization).
+    #[inline]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
 
 /// A Wayland object ID allocated by the **host** compositor side.
 ///
 /// Event handlers (host→client) receive host IDs. Use [`ShadowTable::guest_id_of`]
 /// to translate to the corresponding guest ID. Passing a `HostId` where a `GuestId`
 /// is expected (or vice versa) is a **compile error**.
+///
+/// The inner field is intentionally `pub(crate)` so that arbitrary `HostId(guest_id)`
+/// constructions cannot be made from outside this crate, preserving the type invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HostId(pub u32);
+pub struct HostId(pub(crate) u32);
+
+impl HostId {
+    /// Wrap the raw sender ID from a **host→client event** handler.
+    /// Only call this in handlers where `ctx.last_sender_id` is a host ID.
+    #[inline]
+    pub(crate) fn from_event_sender(ctx: &Context) -> Self {
+        Self(ctx.last_sender_id)
+    }
+
+    /// Extract the raw u32 value (e.g. for wire serialization).
+    #[inline]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// Placeholder guest IDs for host objects bound internally by sommelier.
+///
+/// These are never exposed to the guest client. They occupy a high-bit
+/// sentinel range that cannot collide with real client-allocated IDs
+/// (which start at 2 and grow monotonically upward from there).
+///
+/// Each interface gets its own 24-bit prefix to guarantee uniqueness.
+/// The lower 8 bits hold the allocated host ID (≤ 255 per interface).
+pub(crate) mod sentinel {
+    /// zwp_linux_dmabuf_v1 internal bind.
+    pub(crate) const DMABUF: u32 = 0xFE00_0000;
+    /// wl_shm internal bind.
+    pub(crate) const SHM: u32 = 0xFD00_0000;
+    /// zwp_text_input_manager_v1 internal bind.
+    pub(crate) const TEXT_INPUT_MANAGER_V1: u32 = 0xFC00_0000;
+    /// zcr_text_input_extension_v1 internal bind.
+    pub(crate) const TEXT_INPUT_EXTENSION_V1: u32 = 0xFB00_0000;
+    /// zcr_keyboard_extension_v1 internal bind.
+    pub(crate) const KEYBOARD_EXTENSION: u32 = 0xFA00_0000;
+}
 
 #[allow(dead_code)]
 pub struct ShadowTable {
@@ -64,8 +121,17 @@ impl ShadowTable {
         loop {
             let id = self.next_host_id;
             self.next_host_id = self.next_host_id.wrapping_add(1);
+            // After wrapping through u32::MAX→0, skip the reserved IDs.
+            // We check `next_host_id` (not `id`) so that u32::MAX itself
+            // is skipped on the *next* iteration rather than being returned.
             if self.next_host_id < 2 {
                 self.next_host_id = 2; // Prevent 0 (null) and 1 (wl_display)
+            }
+            // Guard id itself: 0 and 1 are reserved and must never be returned
+            // (id could be 0 or 1 on the very first iteration after a wrap if
+            // next_host_id was adjusted *after* the read above).
+            if id < 2 {
+                continue;
             }
             if !self.host_to_guest.contains_key(&id) {
                 return id;
@@ -319,27 +385,65 @@ impl Context {
         }
     }
 
-    /// In a **host→client event** handler: the host object that fired the event.
-    ///
-    /// `ctx.last_sender_id` in the `HostToClient` direction is always a host ID.
-    /// This method wraps it in `HostId` to make that invariant explicit and prevent
-    /// accidental misuse in request handlers where the sender is a guest.
-    #[allow(dead_code)]
-    #[inline]
-    pub fn host_sender(&self) -> HostId {
-        HostId(self.last_sender_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_host_id_skips_zero_and_one() {
+        let mut table = ShadowTable::new();
+        // Drain the normal range and force a wrap-around.
+        // We fill IDs 2..=u32::MAX (not practical), so instead we simulate
+        // the internal state just after a wrap by directly setting next_host_id.
+        table.next_host_id = u32::MAX;
+        // Allocate once: should skip MAX itself only if it's in the map.
+        // MAX is not in the map so it gets returned.
+        let id = table.allocate_host_id();
+        assert!(id >= 2, "must never return 0 or 1, got {}", id);
     }
 
-    /// In a **client→host request** handler: translate the guest sender to its
-    /// corresponding host object ID.
-    ///
-    /// `ctx.last_sender_id` in the `ClientToHost` direction is always a guest ID.
-    /// Returns `None` if no host mapping exists (shouldn't happen for well-formed
-    /// sessions; log a warning if it does).
-    #[allow(dead_code)]
-    #[inline]
-    pub fn request_sender_host(&self) -> Option<HostId> {
-        self.shadow_table.host_id_of(GuestId(self.last_sender_id))
+    #[test]
+    fn allocate_host_id_wraps_correctly() {
+        let mut table = ShadowTable::new();
+        // Simulate state right after wrapping: next_host_id is 0 → adjusted to 2.
+        table.next_host_id = 0;
+        let id = table.allocate_host_id();
+        assert!(id >= 2, "post-wrap allocation must skip reserved IDs, got {}", id);
+    }
+
+    #[test]
+    fn guest_id_and_host_id_raw_round_trip() {
+        // Verify the typed constructors and raw() round-trip through the same u32.
+        let ctx = Context::new(false, false);
+        // GuestId::from_request_sender reads ctx.last_sender_id.
+        let mut ctx = ctx;
+        ctx.last_sender_id = 42;
+        let gid = GuestId::from_request_sender(&ctx);
+        assert_eq!(gid.raw(), 42);
+
+        ctx.last_sender_id = 99;
+        let hid = HostId::from_event_sender(&ctx);
+        assert_eq!(hid.raw(), 99);
+    }
+
+    #[test]
+    fn sentinel_constants_are_distinct() {
+        // Each sentinel prefix must be unique so they can never collide.
+        let sentinels = [
+            sentinel::DMABUF,
+            sentinel::SHM,
+            sentinel::TEXT_INPUT_MANAGER_V1,
+            sentinel::TEXT_INPUT_EXTENSION_V1,
+            sentinel::KEYBOARD_EXTENSION,
+        ];
+        let unique: std::collections::HashSet<_> = sentinels.iter().collect();
+        assert_eq!(unique.len(), sentinels.len(), "sentinel prefixes must all be distinct");
+        // Every sentinel must be above the practical client ID range.
+        for &s in &sentinels {
+            assert!(s > 0x00FF_FFFF, "sentinel {:#010x} is too close to real client ID range", s);
+        }
     }
 }
 
