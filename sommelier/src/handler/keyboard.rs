@@ -37,10 +37,6 @@ pub struct KeyboardHandler {
     context: xkb::Context,
     keymap: Option<xkb::Keymap>,
     state: Option<xkb::State>,
-    /// XKB modifier index → bitmask for Control, Alt, Shift.
-    control_mask: u32,
-    alt_mask: u32,
-    shift_mask: u32,
     /// Current modifier bitmask (using accelerator.rs conventions).
     modifiers: u32,
     /// Keys dropped on press; their release events are also dropped.
@@ -59,22 +55,8 @@ impl KeyboardHandler {
             context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             keymap: None,
             state: None,
-            control_mask: 0,
-            alt_mask: 0,
-            shift_mask: 0,
             modifiers: 0,
             dropped_keys: std::collections::HashSet::new(),
-        }
-    }
-
-    /// Look up the XKB modifier index for `name` and return the corresponding
-    /// bitmask, or 0 if the modifier does not exist in the keymap.
-    fn mod_mask(keymap: &xkb::Keymap, name: &str) -> u32 {
-        let idx = keymap.mod_get_index(name);
-        if idx != xkb::MOD_INVALID {
-            1 << idx
-        } else {
-            0
         }
     }
 }
@@ -131,9 +113,6 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 xkb::KEYMAP_FORMAT_TEXT_V1,
                 xkb::KEYMAP_COMPILE_NO_FLAGS,
             ) {
-                self.control_mask = Self::mod_mask(&keymap, "Control");
-                self.alt_mask = Self::mod_mask(&keymap, "Mod1");
-                self.shift_mask = Self::mod_mask(&keymap, "Shift");
                 self.state = Some(xkb::State::new(&keymap));
                 self.keymap = Some(keymap);
                 log::debug!("XKB keymap loaded successfully");
@@ -330,15 +309,15 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         if let Some(state) = &mut self.state {
             state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
 
-            let mask = state.serialize_mods(xkb::STATE_MODS_DEPRESSED | xkb::STATE_MODS_LATCHED);
             self.modifiers = 0;
-            if (mask & self.control_mask) != 0 {
+            let components = xkb::STATE_MODS_DEPRESSED | xkb::STATE_MODS_LATCHED;
+            if state.mod_name_is_active("Control", components) {
                 self.modifiers |= crate::accelerator::CONTROL_MASK;
             }
-            if (mask & self.alt_mask) != 0 {
+            if state.mod_name_is_active("Mod1", components) {
                 self.modifiers |= crate::accelerator::ALT_MASK;
             }
-            if (mask & self.shift_mask) != 0 {
+            if state.mod_name_is_active("Shift", components) {
                 self.modifiers |= crate::accelerator::SHIFT_MASK;
             }
         }
