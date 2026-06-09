@@ -67,6 +67,16 @@ impl HostId {
         Self(ctx.last_sender_id)
     }
 
+    /// Wrap an ID freshly returned by [`ShadowTable::allocate_host_id`].
+    ///
+    /// Using this constructor (rather than the bare `HostId(raw)` tuple syntax)
+    /// makes allocation sites auditable: a code search for `from_allocated` finds
+    /// every place a new host-side object is created.
+    #[inline]
+    pub(crate) fn from_allocated(id: u32) -> Self {
+        Self(id)
+    }
+
     /// Extract the raw u32 value (e.g. for wire serialization).
     #[inline]
     pub fn raw(self) -> u32 {
@@ -101,11 +111,16 @@ impl ShadowTable {
     }
 
     pub fn allocate_host_id(&mut self) -> u32 {
-        // Scan at most u32::MAX candidates. In practice sommelier proxies a
-        // single Wayland session whose total object count is bounded by the
-        // compositor (Exo caps it in the thousands), so exhaustion is not a
-        // realistic concern — but an infinite spin is far worse than a panic.
-        for _ in 0..u32::MAX {
+        // Scan every possible candidate exactly once (u32::MAX values, wrapping
+        // back to 2 after u32::MAX). In practice sommelier proxies a single
+        // Wayland session whose total object count is bounded by the compositor
+        // (Exo caps it in the thousands), so exhaustion is not a realistic
+        // concern — but an infinite spin is far worse than a panic.
+        //
+        // NOTE: `0..u32::MAX` would miss the last slot (u32::MAX itself).
+        // The range must be 0..=(u32::MAX as u64) to visit all u32::MAX
+        // candidates without overflow.
+        for _ in 0u64..=(u32::MAX as u64) {
             // `id` is the candidate we are testing this iteration.
             let id = self.next_host_id;
             // Advance the counter; .max(2) handles the u32::MAX → 0 → 2 wrap

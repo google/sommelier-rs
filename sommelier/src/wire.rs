@@ -220,3 +220,38 @@ impl Default for MessageBuilder {
         Self::new()
     }
 }
+
+impl MessageBuilder {
+    /// Assemble a complete Wayland wire message into a `Vec<u8>`.
+    ///
+    /// Wire layout per the Wayland specification §4.3 (Wire Format):
+    ///   - Word 0 (bytes 0–3): `sender_id` (u32, native-endian)
+    ///   - Word 1 (bytes 4–7): `(total_len_bytes << 16) | opcode` (u32, native-endian)
+    ///     - Upper 16 bits: total message length in bytes (header + payload)
+    ///     - Lower 16 bits: request/event opcode
+    ///   - Remaining bytes: payload accumulated via `write_*` calls
+    ///
+    /// # Panics (debug only)
+    /// Asserts that the total message fits within the 65535-byte wire limit.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let mut b = MessageBuilder::new();
+    /// b.write_u32(serial);
+    /// b.write_u32(handled as u32);
+    /// let msg = b.build_message(sender_id, ACK_KEY_OPCODE);
+    /// ```
+    pub fn build_message(self, sender_id: u32, opcode: u16) -> Vec<u8> {
+        debug_assert!(
+            self.payload.len() + 8 <= 0xFFFF,
+            "Wayland message payload too large for wire format ({} bytes)",
+            self.payload.len()
+        );
+        let total_len = (self.payload.len() + 8) as u32;
+        let mut msg = Vec::with_capacity(8 + self.payload.len());
+        msg.extend_from_slice(&sender_id.to_ne_bytes());
+        msg.extend_from_slice(&((total_len << 16) | opcode as u32).to_ne_bytes());
+        msg.extend_from_slice(&self.payload);
+        msg
+    }
+}

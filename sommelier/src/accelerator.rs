@@ -35,10 +35,10 @@ use xkbcommon::xkb;
 ///
 /// These bit positions follow the sommelier C convention, not X11's `Mod*Mask`
 /// values. They are used only internally for accelerator matching.
-pub const CONTROL_MASK: u32 = 1 << 0;
-pub const ALT_MASK: u32 = 1 << 1;
-pub const SHIFT_MASK: u32 = 1 << 2;
-pub const SUPER_MASK: u32 = 1 << 3;
+pub(crate) const CONTROL_MASK: u32 = 1 << 0;
+pub(crate) const ALT_MASK: u32 = 1 << 1;
+pub(crate) const SHIFT_MASK: u32 = 1 << 2;
+pub(crate) const SUPER_MASK: u32 = 1 << 3;
 
 // We need xkb_keysym_to_lower for case-insensitive keysym matching.
 // The xkbcommon-rs crate does not expose this, so we link directly.

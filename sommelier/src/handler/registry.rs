@@ -163,7 +163,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             // specific protocol that enables the ack-key mechanism for
             // controlling host accelerator processing. Not exposed to the guest.
             let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_keyboard_extension_id = Some(HostId(host_id));
+            ctx.host_keyboard_extension_id = Some(HostId::from_allocated(host_id));
             // The host does not send events to the keyboard_extension factory; no
             // shadow table entry needed.
 

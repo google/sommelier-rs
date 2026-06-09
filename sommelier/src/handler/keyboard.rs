@@ -153,31 +153,6 @@ impl Default for KeyboardHandler {
 }
 
 impl KeyboardHandler {
-    /// Build a Wayland wire message into a `Vec<u8>`.
-    ///
-    /// Wire layout per the Wayland specification §4.3 (Wire Format):
-    ///   - Word 0 (bytes 0–3): `sender_id` (u32, native-endian)
-    ///   - Word 1 (bytes 4–7): `(total_len_bytes << 16) | opcode` (u32, native-endian)
-    ///     - Upper 16 bits: total message length in bytes (header + payload)
-    ///     - Lower 16 bits: request/event opcode
-    ///   - Remaining bytes: payload (0 or more u32-aligned words)
-    ///
-    /// All keyboard extension messages have ≤ 8 bytes of payload (16 bytes
-    /// total including the header), well within the 65535-byte wire limit.
-    fn build_wayland_msg(sender_id: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
-        debug_assert!(
-            payload.len() + 8 <= 0xFFFF,
-            "Wayland message payload too large for wire format ({} bytes)",
-            payload.len()
-        );
-        let total_len = (payload.len() + 8) as u32;
-        let mut msg = Vec::with_capacity(8 + payload.len());
-        msg.extend_from_slice(&sender_id.to_ne_bytes());
-        msg.extend_from_slice(&((total_len << 16) | opcode as u32).to_ne_bytes());
-        msg.extend_from_slice(payload);
-        msg
-    }
-
     /// Check if the pressed key matches any configured host accelerators.
     fn is_host_accelerator(&self, accelerators: &[crate::accelerator::Accelerator], key: u32) -> bool {
         let Some(state) = &self.state else { return false; };
@@ -201,7 +176,10 @@ impl KeyboardHandler {
         false
     }
 
-    /// Lazily bind zcr_keyboard_extension_v1.get_extended_keyboard.
+    /// Ensure the `zcr_extended_keyboard_v1` object is bound for this keyboard.
+    ///
+    /// This is idempotent: if the extended keyboard is already bound for
+    /// `host_keyboard_id`, this method is a no-op.
     ///
     /// This is called from `on_enter` (rather than `wl_seat.get_keyboard`) because
     /// the host keyboard ID (`ctx.last_sender_id` in a host→client event) is only
@@ -218,31 +196,28 @@ impl KeyboardHandler {
     /// this request is processed (e.g. auto-repeat already in-flight) will not have
     /// an active TTL in `pending_key_acks_`; Exo will apply its default policy for
     /// those keys. This mirrors the behavior of the C sommelier reference.
-    /// NOTE: This method takes `&self` but has a side-effect on `ctx`
-    /// (`client_to_host_queue.push`). The receiver is `&self` rather than
-    /// `&mut self` because the method reads only `self.{nothing}` and needs
-    /// no mutation of handler state; all mutation targets `ctx`.
-    pub(crate) fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: HostId) {
+    ///
+    /// # Side-effect note
+    /// Takes `&self` (no fields of `self` are read or mutated); all mutation
+    /// targets `ctx`. The unusual receiver avoids a double-borrow when the
+    /// caller already holds `&mut self` for `on_enter`.
+    pub(crate) fn ensure_extended_keyboard_bound(&self, ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
             if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
-                let host_extended_id = HostId(ctx.shadow_table.allocate_host_id());
+                let host_extended_id = HostId::from_allocated(ctx.shadow_table.allocate_host_id());
                 ctx.keyboard_to_extended_keyboard
                     .insert(host_keyboard_id, host_extended_id);
                 ctx.shadow_table
                     .track_host_interface(host_extended_id.0, "zcr_extended_keyboard_v1".to_string());
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
-                // payload = [new_id(4)][keyboard(4)] = 8 bytes inline.
-                let payload = {
-                    let mut buf = [0u8; 8];
-                    buf[0..4].copy_from_slice(&host_extended_id.0.to_ne_bytes());
-                    buf[4..8].copy_from_slice(&host_keyboard_id.0.to_ne_bytes());
-                    buf
-                };
-                let msg = Self::build_wayland_msg(
+                // payload = [new_id(4)][keyboard(4)] = 8 bytes.
+                let mut builder = crate::wire::MessageBuilder::new();
+                builder.write_u32(host_extended_id.0);
+                builder.write_u32(host_keyboard_id.0);
+                let msg = builder.build_message(
                     extension_host_id.0,
                     ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD,
-                    &payload,
                 );
                 ctx.client_to_host_queue.push((msg, Vec::new()));
                 log::debug!(
@@ -261,9 +236,10 @@ impl KeyboardHandler {
     /// a key event arrived before `on_enter` was processed. This should not happen
     /// in normal Wayland flow (Exo always sends `on_enter` before `key`), so we
     /// emit a warning to aid debugging if it ever occurs.
-    /// NOTE: This method takes `&self` but has a side-effect on `ctx`
-    /// (`client_to_host_queue.push`). The receiver is `&self` rather than
-    /// `&mut self` because no handler state is mutated — all writes target `ctx`.
+    ///
+    /// # Side-effect note
+    /// Takes `&self` (no fields of `self` are read or mutated); all mutation
+    /// targets `ctx`.
     fn send_ack_key(&self, ctx: &mut Context, host_keyboard_id: HostId, serial: u32, handled: bool) {
         if ctx.host_keyboard_extension_id.is_none() {
             // Protocol not available on this compositor; silently skip.
@@ -280,13 +256,10 @@ impl KeyboardHandler {
             return;
         };
         // zcr_extended_keyboard_v1.ack_key — payload = [serial(4)][handled(4)].
-        let payload = {
-            let mut buf = [0u8; 8];
-            buf[0..4].copy_from_slice(&serial.to_ne_bytes());
-            buf[4..8].copy_from_slice(&(if handled { 1u32 } else { 0u32 }).to_ne_bytes());
-            buf
-        };
-        let msg = Self::build_wayland_msg(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_ACK_KEY, &payload);
+        let mut builder = crate::wire::MessageBuilder::new();
+        builder.write_u32(serial);
+        builder.write_u32(if handled { 1u32 } else { 0u32 });
+        let msg = builder.build_message(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_ACK_KEY);
         ctx.client_to_host_queue.push((msg, Vec::new()));
     }
 }
@@ -330,6 +303,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         match std::str::from_utf8(&slice[..len]) {
             Err(e) => {
                 log::error!("on_keymap: keymap bytes are not valid UTF-8: {}", e);
+                // Clear stale drop state: keys dropped under the old keymap
+                // may map to different keysyms under a future new keymap.
+                // Keeping them would risk stuck keys after the next successful load.
+                self.dropped_keys.clear();
             }
             Ok(s) => match xkb::Keymap::new_from_string(
                 &self.context,
@@ -339,6 +316,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             ) {
                 None => {
                     log::error!("on_keymap: xkbcommon failed to compile the keymap string");
+                    // Clear stale drop state for the same reason as above.
+                    self.dropped_keys.clear();
                 }
                 Some(keymap) => {
                     self.state = Some(xkb::State::new(&keymap));
@@ -371,7 +350,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // Lazily bind the extended keyboard object on first enter.
         // This sends zcr_keyboard_extension_v1.get_extended_keyboard to the
         // host, which enables ack mode (SetNeedKeyboardKeyAcks(true) in Exo).
-        self.bind_extended_keyboard(ctx, host_keyboard_id);
+        self.ensure_extended_keyboard_bound(ctx, host_keyboard_id);
 
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
@@ -546,7 +525,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         self.dropped_keys.clear();
         if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
             // zcr_extended_keyboard_v1.destroy — no payload (8-byte header only).
-            let msg = Self::build_wayland_msg(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_DESTROY, &[]);
+            let msg = crate::wire::MessageBuilder::new()
+                .build_message(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_DESTROY);
             ctx.client_to_host_queue.push((msg, Vec::new()));
             // Unregister from the host dispatch table so stale peek_key events
             // (version ≥ 2) sent after destroy cannot be dispatched to a dead object.
@@ -826,12 +806,12 @@ mod tests {
         ctx.host_keyboard_extension_id = Some(HostId(99));
 
         // First call: should send get_extended_keyboard.
-        handler.bind_extended_keyboard(&mut ctx, HostId(10));
+        handler.ensure_extended_keyboard_bound(&mut ctx, HostId(10));
         assert_eq!(ctx.client_to_host_queue.len(), 1);
 
         // Second call with the same host_keyboard_id: must not send again.
         ctx.client_to_host_queue.clear();
-        handler.bind_extended_keyboard(&mut ctx, HostId(10));
+        handler.ensure_extended_keyboard_bound(&mut ctx, HostId(10));
         assert!(
             ctx.client_to_host_queue.is_empty(),
             "bind must be idempotent: no second get_extended_keyboard"
@@ -945,7 +925,7 @@ mod tests {
         let mut ctx = Context::new(false, false);
         ctx.host_keyboard_extension_id = Some(HostId(99));
 
-        handler.bind_extended_keyboard(&mut ctx, HostId(10));
+        handler.ensure_extended_keyboard_bound(&mut ctx, HostId(10));
         assert_eq!(ctx.client_to_host_queue.len(), 1);
         let (msg, _) = &ctx.client_to_host_queue[0];
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
@@ -1001,14 +981,17 @@ mod tests {
         );
     }
 
-    /// Structural test: `build_wayland_msg` must produce well-formed wire frames.
+    /// Structural test: `MessageBuilder::build_message` must produce well-formed wire frames.
     ///
     /// This catches any future refactoring that breaks the `[sender][size<<16|opcode][payload]`
     /// encoding, which would silently corrupt all internal protocol messages.
     #[test]
     fn build_wayland_msg_encodes_frame_correctly() {
         let payload = [0x01u8, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]; // two u32 words
-        let msg = KeyboardHandler::build_wayland_msg(42, 7, &payload);
+        let mut builder = crate::wire::MessageBuilder::new();
+        builder.write_u32(0x00000001);
+        builder.write_u32(0x00000002);
+        let msg = builder.build_message(42, 7);
 
         let sender = u32::from_ne_bytes(msg[0..4].try_into().unwrap());
         assert_eq!(sender, 42, "sender_id wrong");
