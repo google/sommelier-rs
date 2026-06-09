@@ -111,7 +111,14 @@ pub struct KeyboardHandler {
     state: Option<xkb::State>,
     /// Current modifier bitmask (using accelerator.rs conventions).
     modifiers: u32,
-    /// Keys dropped on press; their release events are also dropped.
+    /// Keys dropped on press (by evdev keycode, as sent in `wl_keyboard.key`);
+    /// their corresponding release events are also dropped.
+    ///
+    /// Evdev keycodes — not keysyms — are used intentionally: a `wl_keyboard.key`
+    /// release event always carries the same evdev code as its corresponding press,
+    /// regardless of the active XKB shift level or any layout change that occurs
+    /// between the press and the release. Tracking by keycode therefore gives a
+    /// correct and unambiguous press↔release pairing.
     dropped_keys: std::collections::HashSet<u32>,
     /// Statically enforce `!Sync`: `KeyboardHandler` must never be shared
     /// across threads. `xkb::State` uses non-atomic interior mutation.
@@ -299,12 +306,20 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         };
         let slice = mapping.as_bytes();
 
-        // Strip the trailing null terminator if present.
-        let len = if !slice.is_empty() && slice[slice.len() - 1] == 0 {
-            slice.len() - 1
-        } else {
-            slice.len()
-        };
+        // Per the Wayland spec, wl_keyboard.keymap.size always includes exactly
+        // one trailing NUL terminator. Strip it unconditionally so that XKB
+        // receives clean text. If the host sends a malformed keymap without the
+        // terminator this will still be safe (the XKB parser will reject it
+        // rather than reading out-of-bounds — we clamped to `size` bytes above).
+        //
+        // We use a debug_assert (not a hard error) because a missing terminator
+        // is a host protocol violation, not a local invariant failure; the proxy
+        // should degrade gracefully rather than crash.
+        debug_assert!(
+            !slice.is_empty() && slice[slice.len() - 1] == 0,
+            "on_keymap: keymap data is missing the trailing NUL required by the Wayland spec"
+        );
+        let len = (size as usize).saturating_sub(1);
 
         match std::str::from_utf8(&slice[..len]) {
             Err(e) => {
@@ -507,6 +522,16 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             if state.mod_name_is_active(xkb::MOD_NAME_LOGO, components) {
                 self.modifiers |= crate::accelerator::SUPER_MASK;
             }
+        } else {
+            // XKB state is not yet initialised (keymap not yet received). The
+            // Wayland spec permits modifiers to arrive before the keymap on
+            // reconnect. The modifier bitmask stays at 0 (no modifiers assumed)
+            // until the keymap arrives and on_modifiers is called again.
+            log::debug!(
+                "on_modifiers: XKB state not yet initialised (keymap not received); \
+                 modifier event ignored (depressed={:#x}, latched={:#x}, locked={:#x})",
+                mods_depressed, mods_latched, mods_locked
+            );
         }
         Action::Forward
     }
@@ -914,8 +939,9 @@ mod tests {
         use std::ffi::CString;
         let name = CString::new("test-bad-keymap").unwrap();
         let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
-        // Write a lone continuation byte — invalid UTF-8.
-        let bad_bytes: &[u8] = &[0xFF, 0xFE, 0xFD];
+        // Write a lone continuation byte — invalid UTF-8 — followed by a NUL
+        // terminator, because wl_keyboard.keymap.size always includes the NUL.
+        let bad_bytes: &[u8] = &[0xFF, 0xFE, 0xFD, 0x00];
         nix::unistd::write(&fd, bad_bytes).expect("write failed");
 
         use std::os::unix::io::AsRawFd;
@@ -934,8 +960,9 @@ mod tests {
         use std::ffi::CString;
         let name = CString::new("test-bad-xkb").unwrap();
         let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
-        // Valid UTF-8 but not a valid XKB keymap.
-        let garbage = b"this is not a valid xkb keymap";
+        // Valid UTF-8 but not a valid XKB keymap. Include trailing NUL because
+        // wl_keyboard.keymap.size always includes the NUL terminator.
+        let garbage = b"this is not a valid xkb keymap\0";
         nix::unistd::write(&fd, garbage).expect("write failed");
 
         use std::os::unix::io::AsRawFd;

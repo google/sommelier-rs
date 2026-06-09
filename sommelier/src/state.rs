@@ -116,10 +116,19 @@ impl ShadowTable {
             // Advance the counter; .max(2) handles the u32::MAX → 0 → 2 wrap
             // in one step, keeping 0 (null) and 1 (wl_display) permanently skipped.
             self.next_host_id = self.next_host_id.wrapping_add(1).max(2);
-            // Accept only IDs ≥ 2 that are not already assigned.
+            // Accept only IDs ≥ 2 that are not already assigned in either map.
+            // `host_to_guest` tracks guest↔host paired objects; `host_interfaces`
+            // tracks internally-bound objects (keyboard extension, dmabuf, etc.)
+            // that are registered via `track_host_interface` without a guest pair.
+            // Both maps must be checked, otherwise a freshly-allocated ID could
+            // collide with an already-registered internal object.
+            //
             // (The pre-advance id could be 0 or 1 if next_host_id was initialised
             // to those values externally, e.g. in tests.)
-            if id >= 2 && !self.host_to_guest.contains_key(&id) {
+            if id >= 2
+                && !self.host_to_guest.contains_key(&id)
+                && !self.host_interfaces.contains_key(&id)
+            {
                 return id;
             }
         }
@@ -402,13 +411,14 @@ impl Context {
         }
     }
 
-    /// Test-only constructor that bypasses `SOMMELIER_ACCELERATORS` env-var reading.
+    /// Test-only constructor that overrides `SOMMELIER_ACCELERATORS` after construction.
     ///
-    /// Using `Context::new` in unit tests means the test outcome depends on
-    /// whether the developer's shell has `SOMMELIER_ACCELERATORS` set. Most
-    /// tests override `ctx.accelerators` immediately after construction, so
-    /// the bleed only affects tests that do not; but having a stable constructor
-    /// avoids the silent dependency entirely.
+    /// `Context::new` reads `SOMMELIER_ACCELERATORS` from the environment, so
+    /// using it in unit tests would make test outcomes depend on whether the
+    /// developer's shell has that variable set. This constructor calls `new()`
+    /// and then immediately replaces `ctx.accelerators` with the supplied list,
+    /// ensuring tests always run against a known accelerator configuration
+    /// regardless of the environment.
     #[cfg(test)]
     #[allow(dead_code)] // Available for tests that need env-var-independent construction.
     pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
@@ -458,11 +468,36 @@ mod tests {
         //   iter 0: id = 0, advance → wrapping_add(1)=1, .max(2)=2
         //           0 < 2 → skip
         //   iter 1: id = 2, advance → 3
-        //           2 >= 2 and not in map → return 2  ✓
+        //           2 ≥ 2 and not in map → return 2  ✓
         let mut table = ShadowTable::new();
         table.next_host_id = 0;
         let id = table.allocate_host_id();
         assert!(id >= 2, "post-zero allocation must skip reserved IDs, got {}", id);
+    }
+
+    /// Regression: allocate_host_id must not re-issue IDs already registered in
+    /// `host_interfaces` (used for internally-bound objects like
+    /// `zcr_keyboard_extension_v1` that have no guest-side counterpart and are
+    /// therefore absent from `host_to_guest`).
+    ///
+    /// Without the `host_interfaces` check the allocator was blind to these IDs
+    /// and could return an ID that is already in use, causing the dispatcher to
+    /// route messages to the wrong handler.
+    #[test]
+    fn allocate_host_id_skips_host_interfaces_entries() {
+        let mut table = ShadowTable::new();
+        // next_host_id starts at 2.
+        // Register IDs 2 and 3 as host-tracked interfaces (no guest pair).
+        table.track_host_interface(2, "zcr_keyboard_extension_v1".to_string());
+        table.track_host_interface(3, "zwp_linux_dmabuf_v1".to_string());
+
+        // The allocator must skip 2 and 3 (in host_interfaces) and return 4.
+        let id = table.allocate_host_id();
+        assert_eq!(id, 4, "allocator must skip IDs registered in host_interfaces, got {}", id);
+        assert!(
+            !table.host_interfaces.contains_key(&id) || id == 4,
+            "returned ID must not be in host_interfaces"
+        );
     }
 
     #[test]
