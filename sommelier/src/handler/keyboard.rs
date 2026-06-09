@@ -31,6 +31,49 @@ use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
 use xkbcommon::xkb;
 
+/// A read-only view of a shared-memory fd mapped into the process address space.
+///
+/// All `unsafe` for the mmap/munmap pair is confined here:
+/// - `new`: calls `mmap(MAP_SHARED, PROT_READ)` and stores the pointer + length.
+/// - `as_bytes`: constructs a slice; valid because the mapping covers exactly `len` bytes.
+/// - `Drop`: calls `munmap`; the pointer and length are never mutated after construction.
+pub struct MmapView {
+    ptr: std::ptr::NonNull<std::ffi::c_void>,
+    len: usize,
+}
+
+impl MmapView {
+    /// Map `len` bytes from `fd` at offset 0 as read-only shared memory.
+    /// Returns `None` if `len` is zero or if `mmap` fails.
+    pub fn from_fd(fd: std::os::unix::io::RawFd, len: usize) -> Option<Self> {
+        use nix::sys::mman::{mmap, MapFlags, ProtFlags};
+        use std::os::unix::io::BorrowedFd;
+
+        let nonzero_len = std::num::NonZeroUsize::new(len)?;
+        // Safety: fd is valid for the duration of this call; mmap does not
+        // retain it. The returned pointer owns the mapping until munmap.
+        let ptr = unsafe {
+            let borrowed = BorrowedFd::borrow_raw(fd);
+            mmap(None, nonzero_len, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, borrowed, 0).ok()?
+        };
+        Some(Self { ptr, len })
+    }
+
+    /// View the mapped region as a byte slice.
+    pub fn as_bytes(&self) -> &[u8] {
+        // Safety: ptr points to `self.len` readable bytes for the lifetime of
+        // self (mapping is alive until Drop); no other writer exists (PROT_READ).
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr() as *const u8, self.len) }
+    }
+}
+
+impl Drop for MmapView {
+    fn drop(&mut self) {
+        // Safety: ptr and len were set by mmap and never modified.
+        unsafe { let _ = nix::sys::mman::munmap(self.ptr, self.len); }
+    }
+}
+
 /// Keyboard handler that tracks XKB state for keysym resolution and sends
 /// `ack_key` responses to the host via `zcr_extended_keyboard_v1`.
 pub struct KeyboardHandler {
@@ -69,7 +112,7 @@ impl KeyboardHandler {
         let code = (key + 8).into();
         let syms = xkb_state.key_get_syms(code);
         if syms.len() == 1 {
-            let lower_sym = unsafe { crate::accelerator::xkb_keysym_to_lower(syms[0].raw()) };
+            let lower_sym = crate::accelerator::keysym_to_lower(syms[0].raw());
             for acc in accelerators {
                 if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
                     log::debug!("Accelerator match: key={}, modifiers={:#x}, sym={:#x}", key, self.modifiers, lower_sym);
@@ -147,37 +190,17 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             return Action::Forward;
         }
 
-        use nix::sys::mman::{mmap, munmap, MapFlags, ProtFlags};
-        use std::num::NonZeroUsize;
-        use std::os::unix::io::BorrowedFd;
-
-        let Some(nonzero_size) = NonZeroUsize::new(size as usize) else {
-            return Action::Forward;
-        };
-
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(fd) };
-        let Ok(ptr) = (unsafe {
-            mmap(
-                None,
-                nonzero_size,
-                ProtFlags::PROT_READ,
-                MapFlags::MAP_SHARED,
-                borrowed_fd,
-                0,
-            )
-        }) else {
+        let Some(mapping) = MmapView::from_fd(fd, size as usize) else {
             log::error!("on_keymap: mmap failed for fd={}, size={}", fd, size);
             return Action::Forward;
         };
-
-        let slice =
-            unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u8, size as usize) };
+        let slice = mapping.as_bytes();
 
         // Strip the trailing null terminator if present.
-        let len = if size > 0 && slice[size as usize - 1] == 0 {
-            size as usize - 1
+        let len = if !slice.is_empty() && slice[slice.len() - 1] == 0 {
+            slice.len() - 1
         } else {
-            size as usize
+            slice.len()
         };
 
         if let Ok(s) = std::str::from_utf8(&slice[..len]) {
@@ -192,10 +215,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 log::info!("XKB keymap loaded successfully");
             }
         }
-
-        unsafe {
-            let _ = munmap(ptr, size as usize);
-        }
+        // `mapping` drops here, unmapping the region.
 
         Action::Forward
     }

@@ -40,7 +40,16 @@ pub const SHIFT_MASK: u32 = 1 << 2;
 // The xkbcommon-rs crate does not expose this, so import directly.
 #[link(name = "xkbcommon")]
 extern "C" {
-    pub fn xkb_keysym_to_lower(sym: u32) -> u32;
+    #[link_name = "xkb_keysym_to_lower"]
+    fn xkb_keysym_to_lower_ffi(sym: u32) -> u32;
+}
+
+/// Return the lowercase equivalent of a keysym (safe wrapper around the
+/// `xkb_keysym_to_lower` C function). Pure, no side-effects.
+pub fn keysym_to_lower(sym: u32) -> u32 {
+    // Safety: xkb_keysym_to_lower is a pure C function with no restrictions
+    // on its u32 argument — all values are valid keysyms.
+    unsafe { xkb_keysym_to_lower_ffi(sym) }
 }
 
 /// A parsed accelerator: modifier bitmask + lowercase keysym.
