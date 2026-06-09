@@ -59,6 +59,74 @@ impl KeyboardHandler {
             dropped_keys: std::collections::HashSet::new(),
         }
     }
+
+    /// Check if the pressed key matches any configured host accelerators.
+    fn is_host_accelerator(&self, accelerators: &[crate::accelerator::Accelerator], key: u32) -> bool {
+        let Some(xkb_state) = &self.state else {
+            return false;
+        };
+        // Wayland key codes are evdev codes; XKB adds an offset of 8.
+        let code = (key + 8).into();
+        let syms = xkb_state.key_get_syms(code);
+        if syms.len() == 1 {
+            let lower_sym = unsafe { crate::accelerator::xkb_keysym_to_lower(syms[0].raw()) };
+            for acc in accelerators {
+                if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Lazily bind zcr_keyboard_extension_v1.get_extended_keyboard.
+    fn bind_extended_keyboard(&self, ctx: &mut Context, host_keyboard_id: u32) {
+        if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
+            if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
+                let host_extended_id = ctx.shadow_table.allocate_host_id();
+                ctx.keyboard_to_extended_keyboard
+                    .insert(host_keyboard_id, host_extended_id);
+                ctx.shadow_table
+                    .track_host_interface(host_extended_id, "zcr_extended_keyboard_v1".to_string());
+
+                // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(host_extended_id);
+                builder.write_u32(host_keyboard_id);
+
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&extension_host_id.to_ne_bytes());
+                let len = (builder.payload.len() + 8) as u32;
+                let word2 = len << 16; // opcode 0: get_extended_keyboard
+                msg.extend_from_slice(&word2.to_ne_bytes());
+                msg.extend_from_slice(&builder.payload);
+                ctx.client_to_host_queue.push((msg, Vec::new()));
+                log::debug!(
+                    "Bound extended keyboard: host_extended_id={} for host_keyboard_id={}",
+                    host_extended_id,
+                    host_keyboard_id
+                );
+            }
+        }
+    }
+
+    /// Send zcr_extended_keyboard_v1.ack_key to the host.
+    fn send_ack_key(&self, ctx: &mut Context, host_keyboard_id: u32, serial: u32, handled: bool) {
+        if let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) {
+            let handled_val: u32 = if handled { 1 } else { 0 };
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(serial);
+            builder.write_u32(handled_val);
+
+            let mut msg = Vec::new();
+            msg.extend_from_slice(&host_extended_id.to_ne_bytes());
+            let len = (builder.payload.len() + 8) as u32;
+            let word2 = (len << 16) | 1u32; // opcode 1: ack_key
+            msg.extend_from_slice(&word2.to_ne_bytes());
+            msg.extend_from_slice(&builder.payload);
+            ctx.client_to_host_queue.push((msg, Vec::new()));
+        }
+    }
 }
 
 impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
@@ -126,36 +194,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // Lazily bind the extended keyboard object on first enter.
         // This sends zcr_keyboard_extension_v1.get_extended_keyboard to the
         // host, which enables ack mode (SetNeedKeyboardKeyAcks(true) in Exo).
-        if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
-            if !ctx
-                .keyboard_to_extended_keyboard
-                .contains_key(&host_keyboard_id)
-            {
-                let host_extended_id = ctx.shadow_table.allocate_host_id();
-                ctx.keyboard_to_extended_keyboard
-                    .insert(host_keyboard_id, host_extended_id);
-                ctx.shadow_table
-                    .track_host_interface(host_extended_id, "zcr_extended_keyboard_v1".to_string());
-
-                // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(host_extended_id);
-                builder.write_u32(host_keyboard_id);
-
-                let mut msg = Vec::new();
-                msg.extend_from_slice(&extension_host_id.to_ne_bytes());
-                let len = (builder.payload.len() + 8) as u32;
-                let word2 = len << 16; // opcode 0: get_extended_keyboard
-                msg.extend_from_slice(&word2.to_ne_bytes());
-                msg.extend_from_slice(&builder.payload);
-                ctx.client_to_host_queue.push((msg, Vec::new()));
-                log::debug!(
-                    "Bound extended keyboard: host_extended_id={} for host_keyboard_id={}",
-                    host_extended_id,
-                    host_keyboard_id
-                );
-            }
-        }
+        self.bind_extended_keyboard(ctx, host_keyboard_id);
 
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
@@ -235,24 +274,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
         if state == 1 {
             // Key pressed: check if this is a host accelerator.
-            if let Some(xkb_state) = &self.state {
-                // Wayland key codes are evdev codes; XKB adds an offset of 8.
-                let code = (key + 8).into();
-                let syms = xkb_state.key_get_syms(code);
-                if syms.len() == 1 {
-                    let lower_sym =
-                        unsafe { crate::accelerator::xkb_keysym_to_lower(syms[0].raw()) };
-                    for acc in &ctx.accelerators {
-                        if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
-                            // This key is a host accelerator. Don't forward
-                            // to the guest; let the host handle it.
-                            action = Action::Drop;
-                            handled = false;
-                            self.dropped_keys.insert(key);
-                            break;
-                        }
-                    }
-                }
+            if self.is_host_accelerator(&ctx.accelerators, key) {
+                action = Action::Drop;
+                handled = false;
+                self.dropped_keys.insert(key);
             }
         } else if state == 0 {
             // Key released: if we dropped the press, drop the release too
@@ -265,20 +290,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
         // Send ack_key if we have an extended keyboard for this keyboard.
         // This is what actually controls whether the host runs the accelerator.
-        if let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) {
-            let handled_val: u32 = if handled { 1 } else { 0 };
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(serial);
-            builder.write_u32(handled_val);
-
-            let mut msg = Vec::new();
-            msg.extend_from_slice(&host_extended_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | 1u32; // opcode 1: ack_key
-            msg.extend_from_slice(&word2.to_ne_bytes());
-            msg.extend_from_slice(&builder.payload);
-            ctx.client_to_host_queue.push((msg, Vec::new()));
-        }
+        self.send_ack_key(ctx, host_keyboard_id, serial, handled);
 
         action
     }
