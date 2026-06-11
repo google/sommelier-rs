@@ -16,6 +16,7 @@ limitations under the License.
 
 use clap::Parser;
 
+mod accelerator;
 mod allocator;
 mod connection;
 mod handler;
@@ -47,6 +48,10 @@ mod protocols {
         "/xdg_decoration_unstable_v1_protocol.rs"
     ));
     include!(concat!(env!("OUT_DIR"), "/fractional_scale_v1_protocol.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/keyboard_extension_unstable_v1_protocol.rs"
+    ));
 }
 
 #[derive(Parser, Debug)]
@@ -73,7 +78,12 @@ struct Args {
     display: String,
 }
 
-#[tokio::main]
+// SAFETY INVARIANT for `unsafe impl Send for KeyboardHandler` (keyboard.rs):
+// KeyboardHandler holds xkb::Context/Keymap/State which are !Send. The impl is
+// sound only when client tasks are never migrated across OS threads. We enforce
+// this by using a single-threaded Tokio runtime — all tasks run on one thread,
+// so no cross-thread migration can occur.
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let env = env_logger::Env::default().default_filter_or("info");
     env_logger::Builder::from_env(env).init();

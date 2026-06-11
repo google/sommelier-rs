@@ -22,6 +22,60 @@ use crate::allocator::Allocator;
 use crate::virtwl_channel::VirtWaylandChannel;
 use log::warn;
 
+/// A Wayland object ID allocated by the **guest** (client) side.
+///
+/// Request handlers (client→host) receive guest IDs. Use [`ShadowTable::host_id_of`]
+/// to translate to the corresponding host ID. Passing a `GuestId` where a `HostId`
+/// is expected (or vice versa) is a **compile error**.
+///
+/// The inner field is intentionally `pub(crate)` so that arbitrary `GuestId(host_id)`
+/// constructions cannot be made from outside this crate, preserving the type invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GuestId(pub(crate) u32);
+
+impl GuestId {
+    /// Wrap the raw sender ID from a **client→host request** handler.
+    /// Only call this in handlers where `ctx.last_sender_id` is a guest ID.
+    #[inline]
+    pub(crate) fn from_request_sender(ctx: &Context) -> Self {
+        Self(ctx.last_sender_id)
+    }
+}
+
+/// A Wayland object ID allocated by the **host** compositor side.
+///
+/// Event handlers (host→client) receive host IDs. Use [`ShadowTable::guest_id_of`]
+/// to translate to the corresponding guest ID. Passing a `HostId` where a `GuestId`
+/// is expected (or vice versa) is a **compile error**.
+///
+/// The inner field is intentionally `pub(crate)` so that arbitrary `HostId(guest_id)`
+/// constructions cannot be made from outside this crate, preserving the type invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HostId(pub(crate) u32);
+
+impl HostId {
+    /// Wrap the raw sender ID from a **host→client event** handler.
+    /// Only call this in handlers where `ctx.last_sender_id` is a host ID.
+    #[inline]
+    pub(crate) fn from_event_sender(ctx: &Context) -> Self {
+        Self(ctx.last_sender_id)
+    }
+
+    /// Wrap an ID freshly returned by [`ShadowTable::allocate_host_id`].
+    ///
+    /// Using this constructor (rather than the bare `HostId(raw)` tuple syntax)
+    /// makes allocation sites auditable: a code search for `from_allocated` finds
+    /// every place a new host-side object is created.
+    #[inline]
+    pub(crate) fn from_allocated(id: u32) -> Self {
+        Self(id)
+    }
+}
+
+// Each internally-bound interface stores its host ID in a dedicated
+// `ctx.host_*_id` field, and we register it with `track_host_interface`
+// so proxy.rs can dispatch inbound host events without any magic number hackery.
+
 #[allow(dead_code)]
 pub struct ShadowTable {
     guest_to_host: HashMap<u32, u32>,
@@ -45,16 +99,40 @@ impl ShadowTable {
     }
 
     pub fn allocate_host_id(&mut self) -> u32 {
-        loop {
+        // In the common case (next_host_id points to a free slot) this returns
+        // on the first iteration. The u64 loop bound caps worst-case work at
+        // u32::MAX iterations to prevent an infinite spin when the ID space is
+        // nearly full, and triggers a panic instead of looping forever.
+        //
+        // We use u64 for the loop variable to avoid an overflow when constructing
+        // the `RangeInclusive<u32>`: writing `0u32..=u32::MAX` would require
+        // computing `u32::MAX + 1` for the exclusive upper bound, which wraps
+        // to 0 and produces an empty range on platforms where range iteration
+        // checks `start > end`. Casting to u64 sidesteps this entirely.
+        for _ in 0u64..=(u32::MAX as u64) {
+            // `id` is the candidate we are testing this iteration.
             let id = self.next_host_id;
-            self.next_host_id = self.next_host_id.wrapping_add(1);
-            if self.next_host_id < 2 {
-                self.next_host_id = 2; // Prevent 0 (null) and 1 (wl_display)
-            }
-            if !self.host_to_guest.contains_key(&id) {
+            // Advance the counter; .max(2) handles the u32::MAX → 0 → 2 wrap
+            // in one step, keeping 0 (null) and 1 (wl_display) permanently skipped.
+            self.next_host_id = self.next_host_id.wrapping_add(1).max(2);
+            // Accept only IDs ≥ 2 that are not already assigned in either map.
+            // `host_to_guest` tracks guest↔host paired objects; `host_interfaces`
+            // tracks internally-bound objects (keyboard extension, dmabuf, etc.)
+            // that are registered via `track_host_interface` without a guest pair.
+            // Both maps must be checked, otherwise a freshly-allocated ID could
+            // collide with an already-registered internal object.
+            //
+            // (The pre-advance id could be 0 or 1 if next_host_id was initialised
+            // to those values externally, e.g. in tests.)
+            if id >= 2
+                && !self.host_to_guest.contains_key(&id)
+                && !self.host_interfaces.contains_key(&id)
+            {
                 return id;
             }
         }
+        log::error!("sommelier: host Wayland object ID space exhausted");
+        panic!("sommelier: host Wayland object ID space exhausted — this should never happen");
     }
 
     pub fn map_id(&mut self, guest_id: u32, host_id: u32) {
@@ -82,12 +160,40 @@ impl ShadowTable {
         self.host_interfaces.insert(host_id, interface);
     }
 
+    /// Remove a host-side interface registration.
+    ///
+    /// Call this when a host object is destroyed (e.g. `zcr_extended_keyboard_v1.destroy`)
+    /// to prevent stale events for the recycled ID from being dispatched.
+    ///
+    /// # Pipelining note
+    /// The `destroy` request and this registration removal are applied immediately
+    /// on the client side, but the host compositor processes them asynchronously.
+    /// Events for `host_id` that were already queued by the host (e.g. `peek_key`
+    /// in protocol v2+) may arrive after the destroy is sent. Those events will
+    /// be silently dropped by the dispatcher once the registration is gone, which
+    /// is the correct behavior. Exo does not send events after processing `destroy`.
+    pub fn remove_host_interface(&mut self, host_id: u32) {
+        self.host_interfaces.remove(&host_id);
+    }
+
     pub fn get_interface(&self, guest_id: u32) -> Option<&String> {
         self.interfaces.get(&guest_id)
     }
 
     pub fn get_host_interface(&self, host_id: u32) -> Option<&String> {
         self.host_interfaces.get(&host_id)
+    }
+
+    /// Typed lookup: translate a guest-allocated object ID to its host counterpart.
+    /// Use in **client→host request** handlers where `ctx.last_sender_id` is a guest ID.
+    pub fn host_id_of(&self, guest: GuestId) -> Option<HostId> {
+        self.guest_to_host.get(&guest.0).map(|&h| HostId(h))
+    }
+
+    /// Typed lookup: translate a host-allocated object ID to its guest counterpart.
+    /// Use in **host→client event** handlers where `ctx.last_sender_id` is a host ID.
+    pub fn guest_id_of(&self, host: HostId) -> Option<GuestId> {
+        self.host_to_guest.get(&host.0).map(|&g| GuestId(g))
     }
 
     pub fn remove_id(&mut self, guest_id: u32) {
@@ -220,7 +326,9 @@ pub struct Context {
     pub keyboard_to_seat: HashMap<u32, u32>,
     pub active_surface_for_seat: HashMap<u32, u32>,
     pub last_sender_id: u32,
+    /// Pending messages to send from client→host (e.g. ack_key, bind requests).
     pub client_to_host_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
+    /// Pending messages to send from host→client (e.g. synthetic wl_shm.format).
     pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
     pub allocator: Option<Allocator>,
     pub virtwayland_channel: Option<Arc<VirtWaylandChannel>>,
@@ -228,6 +336,17 @@ pub struct Context {
     pub host_shm_id: Option<u32>,
     pub host_text_input_manager_v1_id: Option<u32>,
     pub host_text_input_extension_v1_id: Option<u32>,
+    /// Host-side zcr_keyboard_extension_v1 object ID (bound internally on startup).
+    pub host_keyboard_extension_id: Option<HostId>,
+    /// Maps host keyboard ID → host extended-keyboard ID for `ack_key`.
+    ///
+    /// Both key and value are [`HostId`]s intentionally — using [`GuestId`] here
+    /// by mistake is a **compile error**, preventing the direction bug where a
+    /// client→host request handler reads `ctx.last_sender_id` (a guest ID) and
+    /// uses it to look up a host-keyed map.
+    pub keyboard_to_extended_keyboard: HashMap<HostId, HostId>,
+    /// Parsed SOMMELIER_ACCELERATORS: keys the host should handle.
+    pub accelerators: Vec<crate::accelerator::Accelerator>,
     pub supported_formats: HashSet<u32>,
     pub host_globals: HashMap<String, u32>,
     pub pending_params: HashMap<u32, Vec<PendingParam>>,
@@ -247,6 +366,28 @@ impl Context {
             }
         };
 
+        let accelerators_env = std::env::var("SOMMELIER_ACCELERATORS").unwrap_or_default();
+        let mut accelerators = match crate::accelerator::parse_accelerators(&accelerators_env) {
+            Ok(list) => list,
+            Err(e) => {
+                // A malformed accelerator config should not crash the proxy — that
+                // would break every app in the container. Degrade to no filtering
+                // (all keys forwarded to guest) and log a clear error.
+                warn!(
+                    "Invalid SOMMELIER_ACCELERATORS '{}': {}. \
+                     Accelerator filtering disabled.",
+                    accelerators_env, e
+                );
+                Vec::new()
+            }
+        };
+
+        for def_acc in crate::accelerator::default_accelerators() {
+            if !accelerators.contains(&def_acc) {
+                accelerators.push(def_acc);
+            }
+        }
+
         Self {
             shadow_table: ShadowTable::new(),
             pools: HashMap::new(),
@@ -264,12 +405,131 @@ impl Context {
             host_shm_id: None,
             host_text_input_manager_v1_id: None,
             host_text_input_extension_v1_id: None,
+            host_keyboard_extension_id: None,
+            keyboard_to_extended_keyboard: HashMap::new(),
+            accelerators,
             supported_formats: HashSet::new(),
             host_globals: HashMap::new(),
             pending_params: HashMap::new(),
             feedback_index_maps: HashMap::new(),
             gpu_accel,
             xdg_decoration,
+        }
+    }
+
+    /// Test-only constructor that overrides `SOMMELIER_ACCELERATORS` after construction.
+    ///
+    /// `Context::new` reads `SOMMELIER_ACCELERATORS` from the environment, so
+    /// using it in unit tests would make test outcomes depend on whether the
+    /// developer's shell has that variable set. This constructor calls `new()`
+    /// and then immediately replaces `ctx.accelerators` with the supplied list,
+    /// ensuring tests always run against a known accelerator configuration
+    /// regardless of the environment.
+    #[cfg(test)]
+    pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
+        let mut ctx = Self::new(gpu_accel, xdg_decoration);
+        ctx.accelerators = accelerators;
+        ctx
+    }
+
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_host_id_skips_zero_and_one_after_wrap() {
+        // Verify that when next_host_id wraps from u32::MAX to 0, the allocator
+        // correctly skips the reserved IDs (0 = null, 1 = wl_display) and returns
+        // a valid ID ≥ 2 on both the allocation that reads u32::MAX *and* the
+        // subsequent allocation that reads the post-wrap value.
+        //
+        // Walk-through:
+        //   iter 0: id = u32::MAX, advance → wrapping_add(1)=0, .max(2)=2
+        //           u32::MAX >= 2 and not in map → return u32::MAX  ✓
+        //   (next call) iter 0: id = 2, advance → 3
+        //                       2 >= 2 and not in map → return 2  ✓
+        let mut table = ShadowTable::new();
+        table.next_host_id = u32::MAX;
+
+        let id1 = table.allocate_host_id();
+        assert!(id1 >= 2, "must never return 0 or 1, got {}", id1);
+
+        // The second allocation happens after the counter has wrapped to 2.
+        // It must also return a valid ID and must not collide with id1.
+        let id2 = table.allocate_host_id();
+        assert!(id2 >= 2, "post-wrap allocation must skip reserved IDs, got {}", id2);
+        assert_ne!(id1, id2, "successive allocations must return distinct IDs");
+    }
+
+    #[test]
+    fn allocate_host_id_wraps_correctly() {
+        // Verify that starting with next_host_id = 0 (simulating a state where
+        // the counter was somehow zeroed) results in the first returned ID being
+        // a valid value ≥ 2.
+        //
+        // Walk-through:
+        //   iter 0: id = 0, advance → wrapping_add(1)=1, .max(2)=2
+        //           0 < 2 → skip
+        //   iter 1: id = 2, advance → 3
+        //           2 ≥ 2 and not in map → return 2  ✓
+        let mut table = ShadowTable::new();
+        table.next_host_id = 0;
+        let id = table.allocate_host_id();
+        assert!(id >= 2, "post-zero allocation must skip reserved IDs, got {}", id);
+    }
+
+    /// Regression: allocate_host_id must not re-issue IDs already registered in
+    /// `host_interfaces` (used for internally-bound objects like
+    /// `zcr_keyboard_extension_v1` that have no guest-side counterpart and are
+    /// therefore absent from `host_to_guest`).
+    ///
+    /// Without the `host_interfaces` check the allocator was blind to these IDs
+    /// and could return an ID that is already in use, causing the dispatcher to
+    /// route messages to the wrong handler.
+    #[test]
+    fn allocate_host_id_skips_host_interfaces_entries() {
+        let mut table = ShadowTable::new();
+        // next_host_id starts at 2.
+        // Register IDs 2 and 3 as host-tracked interfaces (no guest pair).
+        table.track_host_interface(2, "zcr_keyboard_extension_v1".to_string());
+        table.track_host_interface(3, "zwp_linux_dmabuf_v1".to_string());
+
+        // The allocator must skip 2 and 3 (in host_interfaces) and return 4.
+        let id = table.allocate_host_id();
+        assert_eq!(id, 4, "allocator must skip IDs registered in host_interfaces, got {}", id);
+        assert!(
+            !table.host_interfaces.contains_key(&id) || id == 4,
+            "returned ID must not be in host_interfaces"
+        );
+    }
+
+    #[test]
+    fn guest_id_and_host_id_raw_round_trip() {
+        // Verify the typed constructors round-trip through the same inner u32.
+        let ctx = Context::new(false, false);
+        let mut ctx = ctx;
+        ctx.last_sender_id = 42;
+        let gid = GuestId::from_request_sender(&ctx);
+        assert_eq!(gid.0, 42);
+
+        ctx.last_sender_id = 99;
+        let hid = HostId::from_event_sender(&ctx);
+        assert_eq!(hid.0, 99);
+    }
+
+    #[test]
+    fn default_accelerators_are_loaded() {
+        let ctx = Context::new(false, false);
+        let defaults = crate::accelerator::default_accelerators();
+        assert!(!defaults.is_empty(), "defaults should not be empty");
+        for def in defaults {
+            assert!(
+                ctx.accelerators.contains(&def),
+                "Context should contain default accelerator {:?}",
+                def
+            );
         }
     }
 }

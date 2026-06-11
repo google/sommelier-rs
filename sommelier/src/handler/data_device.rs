@@ -92,7 +92,7 @@ impl wl_data_offer::WlDataOfferHandler for DataDeviceHandler {
 
             // Push to queue, converting OwnedFd to RawFd
             ctx.client_to_host_queue
-                .push((msg_data, vec![virtwl_fd_dup.into_raw_fd()]));
+                .push((msg_data.into(), vec![virtwl_fd_dup.into_raw_fd()]));
 
             // Spawn pump task
             // DUP client FD because proxy.rs will close the original one

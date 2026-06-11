@@ -67,7 +67,7 @@ impl SommelierHandler {
             extended_text_input_v1: crate::handler::text_input::ExtendedTextInputV1Handler,
             text_input_manager_v3: crate::handler::text_input::TextInputManagerV3Handler,
             text_input_v3: crate::handler::text_input::TextInputV3Handler,
-            keyboard: crate::handler::keyboard::KeyboardHandler,
+            keyboard: crate::handler::keyboard::KeyboardHandler::new(),
             seat: crate::handler::seat::SeatHandler,
         }
     }
@@ -153,6 +153,11 @@ impl Client {
             protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::fractional_scale_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface)
+        {
+            protocols::keyboard_extension_unstable_v1::dispatch_request(
+                interface, msg, handler, ctx,
+            )
         } else {
             Ok(None)
         }
@@ -186,6 +191,9 @@ impl Client {
             protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::fractional_scale_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface)
+        {
+            protocols::keyboard_extension_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -348,6 +356,52 @@ impl Client {
         let mut fds_to_close: std::collections::HashSet<std::os::unix::io::RawFd> =
             std::collections::HashSet::new();
         fds_to_close.extend(out_fds.iter());
+
+        // Bidirectional queue: when processing events in one direction, the
+        // handler may queue messages for the OPPOSITE direction. For example,
+        // processing a host→client wl_keyboard.key event queues an ack_key
+        // message back to the host via client_to_host_queue. Flush that queue
+        // now by sending it back through the source connection.
+        //
+        // Ordering note: the forwarded wl_keyboard.key arrives at the guest
+        // *before* the ack_key reaches the host, because out_buffer is sent
+        // first (above). This is intentional and safe: Exo holds the key in
+        // pending_key_acks_ with a 1000 ms TTL, so the ack always arrives well
+        // within the window. The C sommelier exhibits the same ordering.
+        let mut reverse_out_fds = Vec::new();
+        let reverse_queue = match direction {
+            Direction::ClientToHost => &mut self.ctx.host_to_client_queue,
+            Direction::HostToClient => &mut self.ctx.client_to_host_queue,
+        };
+        let mut reverse_out_buf = Vec::new();
+        for (p_data, p_fds) in reverse_queue.drain(..) {
+            log::debug!(
+                "  -> adding reverse queued message ({} bytes, {} fds)",
+                p_data.len(),
+                p_fds.len()
+            );
+            reverse_out_buf.extend_from_slice(&p_data);
+            reverse_out_fds.extend(p_fds);
+        }
+        if !reverse_out_buf.is_empty()
+            && conn.send(&reverse_out_buf, &reverse_out_fds).await.is_err()
+        {
+            // success=false signals the caller (handle_msgs) to drop this client
+            // connection. We cannot return early here because we still own
+            // reverse_out_fds and must close them below to avoid fd leaks.
+            success = false;
+            // Do NOT return early here: we must still close `reverse_out_fds`
+            // below. sendmsg(SCM_RIGHTS) copies FDs into the kernel cmsg buffer;
+            // if the send fails the originals remain our responsibility and
+            // must be closed to avoid fd leaks.
+        }
+        // FDs are closed unconditionally — we own them and must not leak
+        // regardless of whether the send succeeded or was skipped. When
+        // sendmsg(SCM_RIGHTS) succeeds it duplicates FDs into the kernel
+        // cmsg buffer; the originals are still ours to close. When the send
+        // fails or the buffer was empty, we obviously retain ownership.
+        fds_to_close.extend(reverse_out_fds.iter());
+
         fds_to_close.extend(conn.read_fds.iter().take(fd_offset));
 
         for fd in fds_to_close {
@@ -428,6 +482,13 @@ impl protocols::xdg_decoration_unstable_v1::ProtocolHandler for SommelierHandler
 // Fractional Scale Protocol
 protocols::fractional_scale_v1::impl_sommelier_delegates!(SommelierHandler, {});
 impl protocols::fractional_scale_v1::ProtocolHandler for SommelierHandler {}
+
+// Keyboard Extension Protocol (ChromeOS-specific)
+protocols::keyboard_extension_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {
+    zcr_keyboard_extension_v1: keyboard,
+    zcr_extended_keyboard_v1: keyboard
+});
+impl protocols::keyboard_extension_unstable_v1::ProtocolHandler for SommelierHandler {}
 
 pub async fn run(
     display: &str,
