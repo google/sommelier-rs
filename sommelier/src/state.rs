@@ -367,7 +367,7 @@ impl Context {
         };
 
         let accelerators_env = std::env::var("SOMMELIER_ACCELERATORS").unwrap_or_default();
-        let accelerators = match crate::accelerator::parse_accelerators(&accelerators_env) {
+        let mut accelerators = match crate::accelerator::parse_accelerators(&accelerators_env) {
             Ok(list) => list,
             Err(e) => {
                 // A malformed accelerator config should not crash the proxy — that
@@ -381,6 +381,12 @@ impl Context {
                 Vec::new()
             }
         };
+
+        for def_acc in crate::accelerator::default_accelerators() {
+            if !accelerators.contains(&def_acc) {
+                accelerators.push(def_acc);
+            }
+        }
 
         Self {
             shadow_table: ShadowTable::new(),
@@ -511,6 +517,20 @@ mod tests {
         ctx.last_sender_id = 99;
         let hid = HostId::from_event_sender(&ctx);
         assert_eq!(hid.0, 99);
+    }
+
+    #[test]
+    fn default_accelerators_are_loaded() {
+        let ctx = Context::new(false, false);
+        let defaults = crate::accelerator::default_accelerators();
+        assert!(!defaults.is_empty(), "defaults should not be empty");
+        for def in defaults {
+            assert!(
+                ctx.accelerators.contains(&def),
+                "Context should contain default accelerator {:?}",
+                def
+            );
+        }
     }
 }
 

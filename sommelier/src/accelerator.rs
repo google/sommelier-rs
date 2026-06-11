@@ -143,6 +143,24 @@ pub fn parse_accelerators(s: &str) -> Result<Vec<Accelerator>, ParseError> {
     Ok(result)
 }
 
+/// Returns the list of default accelerators that should always be handled by the host.
+/// This includes standard ChromeOS IME switcher shortcuts to ensure IME switching
+/// works out-of-the-box even if SOMMELIER_ACCELERATORS is empty.
+pub fn default_accelerators() -> Vec<Accelerator> {
+    let defaults = [
+        "<Control>space",
+        "<Control><Shift>space",
+        "<Super>space",
+    ];
+    let mut result = Vec::new();
+    for def in &defaults {
+        if let Ok(acc) = parse_accelerator(def) {
+            result.push(acc);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
