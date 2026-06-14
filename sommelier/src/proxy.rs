@@ -439,7 +439,11 @@ protocols::wayland::impl_sommelier_delegates!(SommelierHandler, {
 impl protocols::wayland::ProtocolHandler for SommelierHandler {}
 
 // XDG Shell Protocol
-protocols::xdg_shell::impl_sommelier_delegates!(SommelierHandler, {});
+protocols::xdg_shell::impl_sommelier_delegates!(SommelierHandler, {
+    xdg_wm_base: compositor,
+    xdg_surface: compositor,
+    xdg_toplevel: compositor
+});
 impl protocols::xdg_shell::ProtocolHandler for SommelierHandler {}
 
 // Linux DMABuf Protocol

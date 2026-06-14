@@ -353,6 +353,16 @@ pub struct Context {
     pub feedback_index_maps: HashMap<u32, HashMap<u16, u16>>,
     pub gpu_accel: bool,
     pub xdg_decoration: bool,
+    /// Host-side zaura_shell object ID (bound internally, not exposed to guest).
+    pub host_zaura_shell_id: Option<u32>,
+    /// VM identifier for ChromeOS guest_os app ID formatting (from SOMMELIER_VM_IDENTIFIER).
+    pub vm_identifier: String,
+    /// Maps host wl_surface ID → host zaura_surface ID for app ID passthrough.
+    pub wl_surface_to_zaura_surface: HashMap<u32, u32>,
+    /// Tracks xdg_surface → wl_surface associations (guest IDs).
+    pub xdg_surface_to_wl_surface: HashMap<u32, u32>,
+    /// Tracks xdg_toplevel → wl_surface associations (guest IDs).
+    pub xdg_toplevel_to_wl_surface: HashMap<u32, u32>,
 }
 
 impl Context {
@@ -414,6 +424,12 @@ impl Context {
             feedback_index_maps: HashMap::new(),
             gpu_accel,
             xdg_decoration,
+            host_zaura_shell_id: None,
+            vm_identifier: std::env::var("SOMMELIER_VM_IDENTIFIER")
+                .unwrap_or_else(|_| "termina".to_string()),
+            wl_surface_to_zaura_surface: HashMap::new(),
+            xdg_surface_to_wl_surface: HashMap::new(),
+            xdg_toplevel_to_wl_surface: HashMap::new(),
         }
     }
 

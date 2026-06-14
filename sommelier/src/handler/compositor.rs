@@ -25,12 +25,32 @@ use log::debug;
 use std::cmp;
 use std::ptr;
 
+/// Opcodes for internally-constructed zaura_shell wire messages.
+/// These are stable per Wayland protocol versioning rules (append-only).
+/// Source: chromiumos/platform2 aura-shell.xml
+const ZAURA_SHELL_GET_AURA_SURFACE: u16 = 0;
+const ZAURA_SURFACE_SET_APPLICATION_ID: u16 = 4;
+const ZAURA_SURFACE_RELEASE: u16 = 27;
+
 pub struct CompositorHandler;
 
 impl WlCompositorHandler for CompositorHandler {}
 
 impl WlSurfaceHandler for CompositorHandler {
     fn on_destroy(&mut self, ctx: &mut Context) -> Action {
+        let wl_surface_guest_id = ctx.last_sender_id;
+        // Clean up any host-side zaura_surface we created for this wl_surface.
+        if let Some(wl_surface_host_id) = ctx.shadow_table.get_host_id(wl_surface_guest_id) {
+            if let Some(zaura_surface_host_id) = ctx.wl_surface_to_zaura_surface.remove(&wl_surface_host_id) {
+                let builder = crate::wire::MessageBuilder::new();
+                let msg = builder.build_message(
+                    zaura_surface_host_id,
+                    ZAURA_SURFACE_RELEASE,
+                );
+                ctx.client_to_host_queue.push((msg, Vec::new()));
+                ctx.shadow_table.remove_host_interface(zaura_surface_host_id);
+            }
+        }
         ctx.surfaces.remove(&ctx.last_sender_id);
         Action::Forward
     }
@@ -117,3 +137,110 @@ impl WlSurfaceHandler for CompositorHandler {
 impl WlRegionHandler for CompositorHandler {}
 impl WlSubcompositorHandler for CompositorHandler {}
 impl WlSubsurfaceHandler for CompositorHandler {}
+
+// --- XDG Shell → wl_surface tracking for zaura_shell integration ---
+//
+// ChromeOS needs a zaura_surface (from zaura_shell) to set the application ID
+// that the shelf uses for icon matching. But the app ID arrives via
+// xdg_toplevel::set_app_id, which doesn't carry a wl_surface reference.
+//
+// We bridge this gap by tracking the chain:
+//   xdg_wm_base::get_xdg_surface(xdg_surface, wl_surface)
+//   xdg_surface::get_toplevel(xdg_toplevel)
+// so that when set_app_id fires on an xdg_toplevel, we can resolve back to
+// the underlying wl_surface and create/reuse a host zaura_surface on it.
+
+impl crate::protocols::xdg_shell::xdg_wm_base::XdgWmBaseHandler for CompositorHandler {
+    fn on_get_xdg_surface(&mut self, ctx: &mut Context, _id: u32, _surface: u32) -> Action {
+        ctx.xdg_surface_to_wl_surface.insert(_id, _surface);
+        Action::Forward
+    }
+}
+
+impl crate::protocols::xdg_shell::xdg_surface::XdgSurfaceHandler for CompositorHandler {
+    fn on_destroy(&mut self, ctx: &mut Context) -> Action {
+        let xdg_surface_id = ctx.last_sender_id;
+        ctx.xdg_surface_to_wl_surface.remove(&xdg_surface_id);
+        Action::Forward
+    }
+
+    fn on_get_toplevel(&mut self, ctx: &mut Context, _id: u32) -> Action {
+        let xdg_surface_id = ctx.last_sender_id;
+        if let Some(&wl_surface_id) = ctx.xdg_surface_to_wl_surface.get(&xdg_surface_id) {
+            ctx.xdg_toplevel_to_wl_surface.insert(_id, wl_surface_id);
+        }
+        Action::Forward
+    }
+}
+
+impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for CompositorHandler {
+    fn on_destroy(&mut self, ctx: &mut Context) -> Action {
+        let xdg_toplevel_id = ctx.last_sender_id;
+        ctx.xdg_toplevel_to_wl_surface.remove(&xdg_toplevel_id);
+        Action::Forward
+    }
+
+    fn on_set_app_id(&mut self, ctx: &mut Context, _app_id: &String) -> Action {
+        let xdg_toplevel_id = ctx.last_sender_id;
+
+        // Resolve xdg_toplevel → wl_surface (guest) → wl_surface (host).
+        if let Some(&wl_surface_guest_id) = ctx.xdg_toplevel_to_wl_surface.get(&xdg_toplevel_id) {
+            if let Some(wl_surface_host_id) = ctx.shadow_table.get_host_id(wl_surface_guest_id) {
+                // Lazily create a host zaura_surface for this wl_surface, or reuse
+                // an existing one. This avoids overhead for surfaces that never
+                // set an app ID (subsurfaces, popups, etc.).
+                let zaura_surface_host_id = if let Some(&existing_zaura_id) =
+                    ctx.wl_surface_to_zaura_surface.get(&wl_surface_host_id)
+                {
+                    existing_zaura_id
+                } else if let Some(zaura_shell_host_id) = ctx.host_zaura_shell_id {
+                    let zaura_surface_host_id = ctx.shadow_table.allocate_host_id();
+                    ctx.shadow_table.track_host_interface(
+                        zaura_surface_host_id,
+                        "zaura_surface".to_string(),
+                    );
+
+                    let mut builder = crate::wire::MessageBuilder::new();
+                    builder.write_u32(zaura_surface_host_id);
+                    builder.write_u32(wl_surface_host_id);
+
+                    let msg = builder.build_message(
+                        zaura_shell_host_id,
+                        ZAURA_SHELL_GET_AURA_SURFACE,
+                    );
+                    ctx.client_to_host_queue.push((msg, Vec::new()));
+
+                    ctx.wl_surface_to_zaura_surface
+                        .insert(wl_surface_host_id, zaura_surface_host_id);
+
+                    zaura_surface_host_id
+                } else {
+                    0
+                };
+
+                if zaura_surface_host_id != 0 {
+                    let formatted_app_id = format!(
+                        "org.chromium.guest_os.{}.wayland.{}",
+                        ctx.vm_identifier, _app_id
+                    );
+
+                    let mut builder = crate::wire::MessageBuilder::new();
+                    builder.write_string(&formatted_app_id);
+
+                    let msg = builder.build_message(
+                        zaura_surface_host_id,
+                        ZAURA_SURFACE_SET_APPLICATION_ID,
+                    );
+                    ctx.client_to_host_queue.push((msg, Vec::new()));
+                    log::debug!(
+                        "Set application ID to {} (formatted: {}) on zaura_surface (host_id={})",
+                        _app_id,
+                        formatted_app_id,
+                        zaura_surface_host_id
+                    );
+                }
+            }
+        }
+        Action::Forward
+    }
+}
