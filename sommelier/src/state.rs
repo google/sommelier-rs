@@ -319,6 +319,7 @@ pub struct TextInputState {
     pub current_preedit: String,
     pub commit_serial: u32,
     pub host_serial: u32,
+    pub host_activated: bool,
 }
 
 pub struct Context {

@@ -383,6 +383,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // host, which enables ack mode (SetNeedKeyboardKeyAcks(true) in Exo).
         Self::ensure_extended_keyboard_bound(ctx, host_keyboard_id);
 
+        let mut text_inputs_to_update = Vec::new();
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
                 ctx.active_surface_for_seat
@@ -398,9 +399,14 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         builder.write_u32(guest_surface_id);
                         let msg = builder.build_message(*guest_text_input_id, 0);
                         ctx.host_to_client_queue.push((msg, Vec::new()));
+                        text_inputs_to_update.push(*guest_text_input_id);
                     }
                 }
             }
+        }
+
+        for id in text_inputs_to_update {
+            crate::handler::text_input::update_host_activation(ctx, id);
         }
 
         Action::Forward
@@ -412,6 +418,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
+        let mut text_inputs_to_update = Vec::new();
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
                 ctx.active_surface_for_seat.remove(&guest_seat_id);
@@ -426,9 +433,14 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         builder.write_u32(guest_surface_id);
                         let msg = builder.build_message(*guest_text_input_id, 1);
                         ctx.host_to_client_queue.push((msg, Vec::new()));
+                        text_inputs_to_update.push(*guest_text_input_id);
                     }
                 }
             }
+        }
+
+        for id in text_inputs_to_update {
+            crate::handler::text_input::update_host_activation(ctx, id);
         }
 
         Action::Forward

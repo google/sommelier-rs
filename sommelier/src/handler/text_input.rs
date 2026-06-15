@@ -519,10 +519,65 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 current_preedit: String::new(),
                 commit_serial: 0,
                 host_serial: 0,
+                host_activated: false,
             },
         );
 
         Action::Drop
+    }
+}
+
+pub fn update_host_activation(ctx: &mut Context, guest_id: u32) {
+    if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+        let host_v1_id = state.host_v1_id;
+        let host_seat = ctx.shadow_table.get_host_id(state.guest_seat).unwrap_or(0);
+        let host_surface = state
+            .active_surface
+            .and_then(|s| ctx.shadow_table.get_host_id(s))
+            .unwrap_or(0);
+
+        let target_activated = state.enabled && host_surface != 0;
+
+        if target_activated != state.host_activated {
+            if target_activated {
+                log::info!(
+                    "update_host_activation: activating text input v1 (guest_id={}, host_v1_id={}) on surface={}",
+                    guest_id,
+                    host_v1_id,
+                    host_surface
+                );
+                // activate: opcode 0
+                let mut builder = crate::wire::MessageBuilder::new();
+                builder.write_u32(host_seat);
+                builder.write_u32(host_surface);
+
+                let mut full_msg = Vec::new();
+                full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+                let len = (builder.payload.len() + 8) as u32;
+                let word2 = len << 16;
+                full_msg.extend_from_slice(&word2.to_ne_bytes());
+                full_msg.extend_from_slice(&builder.payload);
+                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            } else {
+                log::info!(
+                    "update_host_activation: deactivating text input v1 (guest_id={}, host_v1_id={})",
+                    guest_id,
+                    host_v1_id
+                );
+                // deactivate: opcode 1
+                let mut builder = crate::wire::MessageBuilder::new();
+                builder.write_u32(host_seat);
+
+                let mut full_msg = Vec::new();
+                full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
+                let len = (builder.payload.len() + 8) as u32;
+                let word2 = (len << 16) | 1u32;
+                full_msg.extend_from_slice(&word2.to_ne_bytes());
+                full_msg.extend_from_slice(&builder.payload);
+                ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            }
+            state.host_activated = target_activated;
+        }
     }
 }
 
@@ -598,42 +653,13 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.commit_serial += 1;
+        }
+
+        update_host_activation(ctx, guest_id);
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             let host_v1_id = state.host_v1_id;
-            let host_seat = ctx.shadow_table.get_host_id(state.guest_seat).unwrap_or(0);
-            let host_surface = state
-                .active_surface
-                .and_then(|s| ctx.shadow_table.get_host_id(s))
-                .unwrap_or(0);
-
-            if state.enabled_changed {
-                if state.enabled {
-                    // activate: opcode 0
-                    let mut builder = crate::wire::MessageBuilder::new();
-                    builder.write_u32(host_seat);
-                    builder.write_u32(host_surface);
-
-                    let mut full_msg = Vec::new();
-                    full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
-                    let len = (builder.payload.len() + 8) as u32;
-                    let word2 = len << 16;
-                    full_msg.extend_from_slice(&word2.to_ne_bytes());
-                    full_msg.extend_from_slice(&builder.payload);
-                    ctx.client_to_host_queue.push((full_msg, Vec::new()));
-                } else {
-                    // deactivate: opcode 1
-                    let mut builder = crate::wire::MessageBuilder::new();
-                    builder.write_u32(host_seat);
-
-                    let mut full_msg = Vec::new();
-                    full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
-                    let len = (builder.payload.len() + 8) as u32;
-                    let word2 = (len << 16) | 1u32;
-                    full_msg.extend_from_slice(&word2.to_ne_bytes());
-                    full_msg.extend_from_slice(&builder.payload);
-                    ctx.client_to_host_queue.push((full_msg, Vec::new()));
-                }
-                state.enabled_changed = false;
-            }
+            state.enabled_changed = false;
 
             if state.surrounding_text_dirty {
                 if let Some((text, cursor, anchor)) = &state.surrounding_text {
@@ -783,6 +809,7 @@ mod tests {
                 current_preedit: String::new(),
                 commit_serial: 0,
                 host_serial: 0,
+                host_activated: false,
             },
         );
         (ctx, host_v1_id, guest_id)
@@ -1050,6 +1077,151 @@ mod tests {
         let time = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
         assert_eq!(serial, 123);
         assert_eq!(time, 456);
+    }
+
+    #[test]
+    fn test_activation_state_machine() {
+        let (mut ctx, _host_v1_id, guest_id) = setup_v1_ctx();
+
+        // 1. Initially enabled is true (from setup_v1_ctx), active_surface is None.
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.enabled = true;
+            state.host_activated = false;
+        }
+
+        // Guest calls commit before focus (active_surface is None).
+        ctx.last_sender_id = guest_id;
+        let mut v3_handler = TextInputV3Handler;
+        let action = v3_handler.on_commit(&mut ctx);
+        assert_eq!(action, Action::Drop);
+
+        // Should NOT send activate (opcode 0) to host because active_surface is None.
+        let mut found_activate = false;
+        for (msg, _) in &ctx.client_to_host_queue {
+            let opcode = u32::from_ne_bytes(msg[4..8].try_into().unwrap()) & 0xffff;
+            if opcode == 0 {
+                found_activate = true;
+            }
+        }
+        assert!(!found_activate, "Should not send activate when active_surface is None");
+
+        // 2. Keyboard enter is received from host. Set active_surface to a mock guest surface ID (1234).
+        let guest_surface = 1234u32;
+        let host_surface = 5678u32;
+        ctx.shadow_table.map_id(guest_surface, host_surface);
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.active_surface = Some(guest_surface);
+        }
+        update_host_activation(&mut ctx, guest_id);
+
+        // Now it should have sent activate (opcode 0) with surface host_surface (5678).
+        let mut found_activate = false;
+        let mut activate_surface = 0u32;
+        for (msg, _) in &ctx.client_to_host_queue {
+            let opcode = u32::from_ne_bytes(msg[4..8].try_into().unwrap()) & 0xffff;
+            if opcode == 0 {
+                found_activate = true;
+                let payload = &msg[8..];
+                // activate(seat, surface) -> seat is first u32, surface is second u32 (offset 4)
+                activate_surface = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+            }
+        }
+        assert!(found_activate, "Should send activate when focused");
+        assert_eq!(activate_surface, host_surface);
+
+        // Clear the queue to check next transition.
+        ctx.client_to_host_queue.clear();
+
+        // 3. Keyboard leave is received (active_surface is None).
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.active_surface = None;
+        }
+        update_host_activation(&mut ctx, guest_id);
+
+        // Now it should have sent deactivate (opcode 1).
+        let mut found_deactivate = false;
+        for (msg, _) in &ctx.client_to_host_queue {
+            let opcode = u32::from_ne_bytes(msg[4..8].try_into().unwrap()) & 0xffff;
+            if opcode == 1 {
+                found_deactivate = true;
+            }
+        }
+        assert!(found_deactivate, "Should send deactivate when focus is lost");
+    }
+
+    #[test]
+    fn test_cjk_backspace_holding() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        // Register a guest wl_keyboard ID to capture the forwarded key
+        let guest_keyboard_id = 999u32;
+        ctx.shadow_table.map_id(guest_keyboard_id, 888);
+        ctx.shadow_table.track_interface(guest_keyboard_id, "wl_keyboard".to_string());
+
+        let mut v1_handler = TextInputV1Handler;
+        let mut v3_handler = TextInputV3Handler;
+
+        // 1. Focus is enter.
+        let guest_surface = 1234u32;
+        let host_surface = 5678u32;
+        ctx.shadow_table.map_id(guest_surface, host_surface);
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.active_surface = Some(guest_surface);
+        }
+        update_host_activation(&mut ctx, guest_id);
+
+        // 2. Client types "가나다라" and commits it.
+        ctx.last_sender_id = guest_id;
+        v3_handler.on_set_surrounding_text(&mut ctx, &"가나다라".to_string(), 12, 12);
+        v3_handler.on_commit(&mut ctx);
+
+        // Verify state has UTF-8 byte len 12
+        if let Some(state) = ctx.text_inputs.get(&guest_id) {
+            assert_eq!(state.surrounding_text.as_ref().unwrap().0, "가나다라");
+            assert_eq!(state.surrounding_text.as_ref().unwrap().1, 12);
+        } else {
+            panic!("state not found");
+        }
+
+        // 3. User holds Backspace. We simulate multiple backspace repeat events.
+        let mut text = "가나다라".to_string();
+        
+        for expected_len in (0..4).rev() {
+            ctx.last_sender_id = host_v1_id;
+            ctx.host_to_client_queue.clear();
+
+            // 0xff08 is KEY_BackSpace. Simulate key press (state=1)
+            v1_handler.on_keysym(&mut ctx, 100 + expected_len, 200 + expected_len, 0xff08, 1, 0);
+
+            // Verify a synthetic backspace pressed key event is forwarded
+            assert_eq!(ctx.host_to_client_queue.len(), 1);
+            assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 3); // wl_keyboard::key
+            assert_eq!(msg_sender(&ctx.host_to_client_queue, 0), guest_keyboard_id);
+
+            // Simulating client-side buffer deletion
+            let popped = text.pop();
+            assert!(popped.is_some());
+
+            // Client sets surrounding text and commits
+            ctx.last_sender_id = guest_id;
+            v3_handler.on_set_surrounding_text(&mut ctx, &text, text.len() as i32, text.len() as i32);
+            v3_handler.on_commit(&mut ctx);
+
+            // Verify the surrounding text updated in state
+            if let Some(state) = ctx.text_inputs.get(&guest_id) {
+                assert_eq!(state.surrounding_text.as_ref().unwrap().0, text);
+                assert_eq!(state.surrounding_text.as_ref().unwrap().1, text.len() as i32);
+            }
+        }
+
+        // Final verification: buffer is completely empty
+        assert_eq!(text, "");
+        if let Some(state) = ctx.text_inputs.get(&guest_id) {
+            assert_eq!(state.surrounding_text.as_ref().unwrap().0, "");
+            assert_eq!(state.surrounding_text.as_ref().unwrap().1, 0);
+        }
     }
 }
 
