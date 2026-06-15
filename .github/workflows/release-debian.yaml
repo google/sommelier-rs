@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (must match Cargo.toml, e.g. 0.1.0)'
+        required: true
+        default: '0.1.0'
 
 permissions:
   contents: write
@@ -44,11 +50,18 @@ jobs:
       - name: Verify tag matches Cargo.toml
         run: |
           CARGO_VERSION=$(cargo read-manifest --manifest-path sommelier/Cargo.toml | jq -r '.version')
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG_VERSION="${{ github.event.inputs.version }}"
+          else
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
           echo "Found Cargo.toml version: ${CARGO_VERSION}"
-          echo "Found Tag version: ${TAG_VERSION}"
+          echo "Found Target version: ${TAG_VERSION}"
+
           if [ "${CARGO_VERSION}" != "${TAG_VERSION}" ]; then
-            echo "::error::Version mismatch! Cargo.toml says ${CARGO_VERSION} but tag says ${TAG_VERSION}."
+            echo "::error::Version mismatch! Cargo.toml says ${CARGO_VERSION} but target says ${TAG_VERSION}."
             exit 1
           fi
           echo "Versions match. Proceeding with build..."
@@ -72,8 +85,12 @@ jobs:
 
       - name: Prepare and Rename Artifact
         run: |
-          RAW_TAG="${GITHUB_REF_NAME}"
-          VERSION="${RAW_TAG}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="v${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          
           if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
             SHORT_ARCH="x86_64"
           elif [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
@@ -82,14 +99,17 @@ jobs:
             echo "Error: Unknown matrix target '${{ matrix.target }}'. Failing fast."
             exit 1
           fi
-          # Add -debian13 suffix to distinguish from standard Ubuntu-built binaries
           FINAL_NAME="sommelier_rs-${VERSION}-${SHORT_ARCH}-debian13"
           mv target/${{ matrix.target }}/release/sommelier ./${FINAL_NAME}
+          
+          # Expose artifact name and release tag for next step
           echo "ARTIFACT_NAME=${FINAL_NAME}" >> $GITHUB_ENV
+          echo "RELEASE_TAG=${VERSION}" >> $GITHUB_ENV
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2.6.1
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: ./${{ env.ARTIFACT_NAME }}
           draft: false
           prerelease: false
