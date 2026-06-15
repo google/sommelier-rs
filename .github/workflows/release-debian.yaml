@@ -1,0 +1,95 @@
+name: sommelier-rs Release (Debian 13)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:trixie-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+
+    steps:
+      - name: Install basic tools
+        run: |
+          apt-get update && apt-get -y install \
+            build-essential \
+            curl \
+            git \
+            pkg-config \
+            jq \
+            libxkbcommon-dev \
+            libgbm-dev \
+            libdrm-dev \
+            libexpat1-dev
+
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Verify tag matches Cargo.toml
+        run: |
+          CARGO_VERSION=$(cargo read-manifest --manifest-path sommelier/Cargo.toml | jq -r '.version')
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Found Cargo.toml version: ${CARGO_VERSION}"
+          echo "Found Tag version: ${TAG_VERSION}"
+          if [ "${CARGO_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "::error::Version mismatch! Cargo.toml says ${CARGO_VERSION} but tag says ${TAG_VERSION}."
+            exit 1
+          fi
+          echo "Versions match. Proceeding with build..."
+
+      - name: Install aarch64 dependencies
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          dpkg --add-architecture arm64
+          apt-get update
+          apt-get install -y gcc-aarch64-linux-gnu libxkbcommon-dev:arm64 libgbm-dev:arm64 libdrm-dev:arm64 libexpat1-dev:arm64
+
+      - name: Add Rust Target
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+
+      - name: Build Release Binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --verbose --target ${{ matrix.target }}
+
+      - name: Prepare and Rename Artifact
+        run: |
+          RAW_TAG="${GITHUB_REF_NAME}"
+          VERSION="${RAW_TAG}"
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
+            SHORT_ARCH="x86_64"
+          elif [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            SHORT_ARCH="aarch64"
+          else
+            echo "Error: Unknown matrix target '${{ matrix.target }}'. Failing fast."
+            exit 1
+          fi
+          # Add -debian13 suffix to distinguish from standard Ubuntu-built binaries
+          FINAL_NAME="sommelier_rs-${VERSION}-${SHORT_ARCH}-debian13"
+          mv target/${{ matrix.target }}/release/sommelier ./${FINAL_NAME}
+          echo "ARTIFACT_NAME=${FINAL_NAME}" >> $GITHUB_ENV
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2.6.1
+        with:
+          files: ./${{ env.ARTIFACT_NAME }}
+          draft: false
+          prerelease: false
