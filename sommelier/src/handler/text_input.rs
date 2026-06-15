@@ -31,15 +31,19 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_preedit_string(
         &mut self,
         ctx: &mut Context,
-        _serial: u32,
+        serial: u32,
         text: &String,
         _commit: &String,
     ) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            let commit_serial = if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+                state.host_serial = serial;
                 state.current_preedit = text.clone();
-            }
+                state.commit_serial
+            } else {
+                0
+            };
 
             // v3 preedit_string (opcode 2)
             let mut builder = crate::wire::MessageBuilder::new();
@@ -56,9 +60,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             ctx.host_to_client_queue.push((msg, Vec::new()));
 
             // v3 done (opcode 5)
-            // serial matches state but for simplicity we can send 0 or _serial
             let mut builder = crate::wire::MessageBuilder::new();
-            builder.write_u32(0); // serial
+            builder.write_u32(commit_serial); // serial
 
             let mut msg = Vec::new();
             msg.extend_from_slice(&guest_id.to_ne_bytes());
@@ -71,12 +74,16 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         Action::Drop
     }
 
-    fn on_commit_string(&mut self, ctx: &mut Context, _serial: u32, text: &String) -> Action {
+    fn on_commit_string(&mut self, ctx: &mut Context, serial: u32, text: &String) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            let commit_serial = if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+                state.host_serial = serial;
                 state.current_preedit.clear();
-            }
+                state.commit_serial
+            } else {
+                0
+            };
 
             // v3 preedit_string (opcode 2) - explicitly clear preedit before commit
             let mut builder = crate::wire::MessageBuilder::new();
@@ -105,9 +112,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             ctx.host_to_client_queue.push((msg, Vec::new()));
 
             // v3 done (opcode 5)
-            // serial matches state but for simplicity we can send 0 or _serial
             let mut builder = crate::wire::MessageBuilder::new();
-            builder.write_u32(0); // serial
+            builder.write_u32(commit_serial); // serial
 
             let mut msg = Vec::new();
             msg.extend_from_slice(&guest_id.to_ne_bytes());
@@ -123,12 +129,18 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_keysym(
         &mut self,
         ctx: &mut Context,
-        _serial: u32,
+        serial: u32,
         _time: u32,
         sym: u32,
         state: u32,
         _modifiers: u32,
     ) -> Action {
+        let host_id = ctx.last_sender_id;
+        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
+                s.host_serial = serial;
+            }
+        }
         let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
         if let Some(keymap) = xkbcommon::xkb::Keymap::new_from_names(
             &context,
@@ -214,6 +226,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     ) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            let commit_serial = if let Some(state) = ctx.text_inputs.get(&guest_id) {
+                state.commit_serial
+            } else {
+                0
+            };
+
             let length_i32 = i32::try_from(length).unwrap_or_else(|_| {
                 log::warn!(
                     "on_delete_surrounding_text: length {} exceeds i32::MAX, clamping",
@@ -249,7 +267,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
             // v3 done (opcode 5)
             let mut builder = crate::wire::MessageBuilder::new();
-            builder.write_u32(0); // serial
+            builder.write_u32(commit_serial); // serial
 
             let mut msg = Vec::new();
             msg.extend_from_slice(&guest_id.to_ne_bytes());
@@ -262,11 +280,23 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         Action::Drop
     }
 
-    fn on_language(&mut self, _ctx: &mut Context, _serial: u32, _language: &String) -> Action {
+    fn on_language(&mut self, ctx: &mut Context, serial: u32, _language: &String) -> Action {
+        let host_id = ctx.last_sender_id;
+        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
+                s.host_serial = serial;
+            }
+        }
         Action::Drop
     }
 
-    fn on_text_direction(&mut self, _ctx: &mut Context, _serial: u32, _direction: u32) -> Action {
+    fn on_text_direction(&mut self, ctx: &mut Context, serial: u32, _direction: u32) -> Action {
+        let host_id = ctx.last_sender_id;
+        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
+                s.host_serial = serial;
+            }
+        }
         Action::Drop
     }
 }
@@ -283,6 +313,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             .iter_mut()
             .find(|(_, s)| s.host_ext_id == host_ext_id)
         {
+            let commit_serial = state.commit_serial;
             if let Some((text, cursor, _anchor)) = &state.surrounding_text {
                 let cursor_i64 = *cursor as i64;
                 let index_i64 = index as i64;
@@ -338,7 +369,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
 
                     // v3 done (opcode 5)
                     let mut builder = crate::wire::MessageBuilder::new();
-                    builder.write_u32(0); // serial
+                    builder.write_u32(commit_serial); // serial
 
                     let mut msg = Vec::new();
                     msg.extend_from_slice(&guest_id.to_ne_bytes());
@@ -391,6 +422,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             .iter_mut()
             .find(|(_, s)| s.host_ext_id == host_ext_id)
         {
+            let commit_serial = state.commit_serial;
             let preedit_text = state.current_preedit.clone();
             if !preedit_text.is_empty() {
                 // v3 commit_string (opcode 3)
@@ -409,7 +441,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
 
                 // v3 done (opcode 5)
                 let mut builder = crate::wire::MessageBuilder::new();
-                builder.write_u32(0); // serial
+                builder.write_u32(commit_serial); // serial
 
                 let mut msg = Vec::new();
                 msg.extend_from_slice(&guest_id.to_ne_bytes());
@@ -485,6 +517,8 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
+                commit_serial: 0,
+                host_serial: 0,
             },
         );
 
@@ -563,6 +597,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         let guest_id = ctx.last_sender_id;
 
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.commit_serial += 1;
             let host_v1_id = state.host_v1_id;
             let host_seat = ctx.shadow_table.get_host_id(state.guest_seat).unwrap_or(0);
             let host_surface = state
@@ -690,7 +725,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
             // commit_state: opcode 9
             let mut builder = crate::wire::MessageBuilder::new();
-            builder.write_u32(0); // serial
+            builder.write_u32(state.host_serial); // serial
 
             let mut full_msg = Vec::new();
             full_msg.extend_from_slice(&host_v1_id.to_ne_bytes());
@@ -710,6 +745,7 @@ mod tests {
     use super::*;
     use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
     use crate::protocols::text_input_extension_unstable_v1::zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler;
+    use crate::protocols::text_input_unstable_v3::zwp_text_input_v3::ZwpTextInputV3Handler;
 
     /// Helper: extract opcode from a wire message at the given index in a queue.
     fn msg_opcode(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u16 {
@@ -745,15 +781,26 @@ mod tests {
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
+                commit_serial: 0,
+                host_serial: 0,
             },
         );
         (ctx, host_v1_id, guest_id)
+    }
+
+    fn msg_done_serial(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u32 {
+        let payload = &queue[idx].0[8..];
+        u32::from_ne_bytes(payload[0..4].try_into().unwrap())
     }
 
     #[test]
     fn on_preedit_string_sends_v3_preedit_and_done() {
         let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
         ctx.last_sender_id = host_v1_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.commit_serial = 42;
+        }
 
         let mut handler = TextInputV1Handler;
         let text = "こんにちは".to_string();
@@ -768,12 +815,17 @@ mod tests {
 
         assert_eq!(msg_sender(&ctx.host_to_client_queue, 1), guest_id);
         assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 5); // done
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 1), 42); // serial
     }
 
     #[test]
     fn on_commit_string_sends_preedit_clear_then_commit_then_done() {
         let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
         ctx.last_sender_id = host_v1_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.commit_serial = 42;
+        }
 
         let mut handler = TextInputV1Handler;
         let text = "確定".to_string();
@@ -786,6 +838,7 @@ mod tests {
         assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 2); // preedit_string (clear)
         assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 3); // commit_string
         assert_eq!(msg_opcode(&ctx.host_to_client_queue, 2), 5); // done
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 2), 42); // serial
 
         // All messages should target the guest_id
         for i in 0..3 {
@@ -797,6 +850,10 @@ mod tests {
     fn on_delete_surrounding_text_negative_index_spanning_cursor() {
         let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
         ctx.last_sender_id = host_v1_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.commit_serial = 42;
+        }
 
         let mut handler = TextInputV1Handler;
         let action = handler.on_delete_surrounding_text(&mut ctx, -3, 5);
@@ -817,6 +874,7 @@ mod tests {
 
         assert_eq!(msg_sender(&ctx.host_to_client_queue, 1), guest_id);
         assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 5); // done
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 1), 42); // serial
     }
 
     #[test]
@@ -846,6 +904,7 @@ mod tests {
 
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.surrounding_text = Some(("가나다".to_string(), 6, 6)); // "가나" is 6 bytes
+            state.commit_serial = 42;
         }
 
         let mut handler = ExtendedTextInputV1Handler;
@@ -872,6 +931,7 @@ mod tests {
 
         // 3. done (opcode 5)
         assert_eq!(msg_opcode(&ctx.host_to_client_queue, 2), 5);
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 2), 42); // serial
 
         // Cached preedit should be updated
         if let Some(state) = ctx.text_inputs.get(&guest_id) {
@@ -889,6 +949,7 @@ mod tests {
 
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.current_preedit = "나".to_string();
+            state.commit_serial = 42;
         }
 
         let mut handler = ExtendedTextInputV1Handler;
@@ -907,6 +968,7 @@ mod tests {
 
         // 2. done (opcode 5)
         assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 5);
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 1), 42); // serial
 
         // Cached preedit should be cleared
         if let Some(state) = ctx.text_inputs.get(&guest_id) {
@@ -914,6 +976,46 @@ mod tests {
         } else {
             panic!("state not found");
         }
+    }
+
+    #[test]
+    fn host_serial_updated_and_propagated_to_commit_state() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        let mut handler = TextInputV1Handler;
+
+        // 1. Send preedit_string from host with serial 99
+        let text = "あ".to_string();
+        let action = handler.on_preedit_string(&mut ctx, 99, &text, &String::new());
+        assert_eq!(action, Action::Drop);
+
+        // State should store host_serial = 99
+        if let Some(state) = ctx.text_inputs.get(&guest_id) {
+            assert_eq!(state.host_serial, 99);
+        } else {
+            panic!("state not found");
+        }
+
+        // 2. Client calls on_commit
+        ctx.last_sender_id = guest_id;
+        let mut v3_handler = TextInputV3Handler;
+        let action = v3_handler.on_commit(&mut ctx);
+        assert_eq!(action, Action::Drop);
+
+        // Find the client_to_host_queue messages
+        // Opcode 9 is commit_state. The serial should be 99.
+        let mut found_commit_state = false;
+        for (msg, _) in &ctx.client_to_host_queue {
+            let opcode = u32::from_ne_bytes(msg[4..8].try_into().unwrap()) & 0xffff;
+            if opcode == 9 {
+                let payload = &msg[8..];
+                let serial = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+                assert_eq!(serial, 99);
+                found_commit_state = true;
+            }
+        }
+        assert!(found_commit_state);
     }
 }
 
