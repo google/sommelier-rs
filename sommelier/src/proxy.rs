@@ -249,6 +249,7 @@ impl Client {
                     WireMessage::new(sender_id, opcode, &packet[8..], &conn.read_fds[fd_offset..]);
 
                 log::trace!("[{:?}] {}:{} (len={})", direction, interface, opcode, len);
+                log_ime_message(direction, &interface, opcode, &packet[8..], false);
 
                 self.ctx.last_sender_id = sender_id;
 
@@ -309,6 +310,19 @@ impl Client {
                         }
                     }
 
+                    if data.len() >= 8 {
+                        let sender_id = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+                        let word2 = u32::from_ne_bytes(data[4..8].try_into().unwrap());
+                        let opcode = (word2 & 0xFFFF) as u16;
+                        let interface = match direction {
+                            Direction::ClientToHost => self.ctx.shadow_table.get_host_interface(sender_id).cloned(),
+                            Direction::HostToClient => self.ctx.shadow_table.get_interface(sender_id).cloned(),
+                        };
+                        if let Some(iface) = interface {
+                            log_ime_message(direction, &iface, opcode, &data[8..], true);
+                        }
+                    }
+
                     out_buffer.extend_from_slice(&data);
                     out_fds.extend(fds);
                 }
@@ -341,6 +355,18 @@ impl Client {
                     p_data.len(),
                     p_fds.len()
                 );
+                if p_data.len() >= 8 {
+                    let sender_id = u32::from_ne_bytes(p_data[0..4].try_into().unwrap());
+                    let word2 = u32::from_ne_bytes(p_data[4..8].try_into().unwrap());
+                    let opcode = (word2 & 0xFFFF) as u16;
+                    let interface = match direction {
+                        Direction::ClientToHost => self.ctx.shadow_table.get_host_interface(sender_id).cloned(),
+                        Direction::HostToClient => self.ctx.shadow_table.get_interface(sender_id).cloned(),
+                    };
+                    if let Some(iface) = interface {
+                        log_ime_message(direction, &iface, opcode, &p_data[8..], true);
+                    }
+                }
                 out_buffer.extend_from_slice(&p_data);
                 out_fds.extend(p_fds);
             }
@@ -380,6 +406,22 @@ impl Client {
                 p_data.len(),
                 p_fds.len()
             );
+            if p_data.len() >= 8 {
+                let sender_id = u32::from_ne_bytes(p_data[0..4].try_into().unwrap());
+                let word2 = u32::from_ne_bytes(p_data[4..8].try_into().unwrap());
+                let opcode = (word2 & 0xFFFF) as u16;
+                let reverse_direction = match direction {
+                    Direction::ClientToHost => Direction::HostToClient,
+                    Direction::HostToClient => Direction::ClientToHost,
+                };
+                let interface = match reverse_direction {
+                    Direction::ClientToHost => self.ctx.shadow_table.get_host_interface(sender_id).cloned(),
+                    Direction::HostToClient => self.ctx.shadow_table.get_interface(sender_id).cloned(),
+                };
+                if let Some(iface) = interface {
+                    log_ime_message(reverse_direction, &iface, opcode, &p_data[8..], true);
+                }
+            }
             reverse_out_buf.extend_from_slice(&p_data);
             reverse_out_fds.extend(p_fds);
         }
@@ -607,5 +649,285 @@ pub async fn run(
                 log::error!("Accept error: {}", e);
             }
         }
+    }
+}
+
+fn log_ime_message(direction: Direction, interface: &str, opcode: u16, payload: &[u8], outgoing: bool) {
+    if !interface.contains("text_input") && !interface.contains("keyboard") {
+        return;
+    }
+    let mut msg = WireMessage::new(0, opcode, payload, &[]);
+    let mut details = String::new();
+    let res = (|| -> Result<(), ProtocolError> {
+        match (interface, direction) {
+            ("wl_keyboard", Direction::HostToClient) => match opcode {
+                3 => {
+                    let serial = msg.read_u32()?;
+                    let time = msg.read_u32()?;
+                    let key = msg.read_u32()?;
+                    let state = msg.read_u32()?;
+                    details = format!("key (serial={}, time={}, key={}, state={})", serial, time, key, state);
+                }
+                4 => {
+                    let serial = msg.read_u32()?;
+                    let mods_depressed = msg.read_u32()?;
+                    let mods_latched = msg.read_u32()?;
+                    let mods_locked = msg.read_u32()?;
+                    let group = msg.read_u32()?;
+                    details = format!("modifiers (serial={}, depressed={}, latched={}, locked={}, group={})", serial, mods_depressed, mods_latched, mods_locked, group);
+                }
+                _ => {
+                    details = format!("opcode={}", opcode);
+                }
+            },
+            ("zwp_text_input_v1", Direction::ClientToHost) => match opcode {
+                0 => {
+                    let window_parent = msg.read_u32()?;
+                    let seat = msg.read_u32()?;
+                    details = format!("activate (window_parent={}, seat={})", window_parent, seat);
+                }
+                1 => {
+                    let seat = msg.read_u32()?;
+                    details = format!("deactivate (seat={})", seat);
+                }
+                2 => {
+                    details = "show_input_panel".to_string();
+                }
+                3 => {
+                    details = "hide_input_panel".to_string();
+                }
+                4 => {
+                    details = "reset".to_string();
+                }
+                5 => {
+                    let text = msg.read_string()?;
+                    let cursor = msg.read_i32()?;
+                    let anchor = msg.read_i32()?;
+                    details = format!("set_surrounding_text (text={:?}, cursor={}, anchor={})", text, cursor, anchor);
+                }
+                6 => {
+                    let hint = msg.read_u32()?;
+                    let purpose = msg.read_u32()?;
+                    details = format!("set_content_type (hint={}, purpose={})", hint, purpose);
+                }
+                7 => {
+                    let x = msg.read_i32()?;
+                    let y = msg.read_i32()?;
+                    let width = msg.read_i32()?;
+                    let height = msg.read_i32()?;
+                    details = format!("set_cursor_rectangle (x={}, y={}, width={}, height={})", x, y, width, height);
+                }
+                8 => {
+                    let language = msg.read_string()?;
+                    details = format!("set_preferred_language (language={:?})", language);
+                }
+                9 => {
+                    let serial = msg.read_u32()?;
+                    details = format!("commit_state (serial={})", serial);
+                }
+                10 => {
+                    let button = msg.read_u32()?;
+                    let index = msg.read_u32()?;
+                    details = format!("invoke_action (button={}, index={})", button, index);
+                }
+                _ => {
+                    details = format!("opcode={}", opcode);
+                }
+            },
+            ("zwp_text_input_v1", Direction::HostToClient) => match opcode {
+                0 => {
+                    let surface = msg.read_u32()?;
+                    details = format!("enter (surface={})", surface);
+                }
+                1 => {
+                    details = "leave".to_string();
+                }
+                2 => {
+                    details = "modifiers_map".to_string();
+                }
+                3 => {
+                    let state = msg.read_u32()?;
+                    details = format!("input_panel_state (state={})", state);
+                }
+                4 => {
+                    let serial = msg.read_u32()?;
+                    let text = msg.read_string()?;
+                    let commit = msg.read_string()?;
+                    details = format!("preedit_string (serial={}, text={:?}, commit={:?})", serial, text, commit);
+                }
+                5 => {
+                    let index = msg.read_u32()?;
+                    let length = msg.read_u32()?;
+                    let style = msg.read_u32()?;
+                    details = format!("preedit_styling (index={}, length={}, style={})", index, length, style);
+                }
+                6 => {
+                    let index = msg.read_i32()?;
+                    details = format!("preedit_cursor (index={})", index);
+                }
+                7 => {
+                    let serial = msg.read_u32()?;
+                    let text = msg.read_string()?;
+                    details = format!("commit_string (serial={}, text={:?})", serial, text);
+                }
+                8 => {
+                    let index = msg.read_i32()?;
+                    let anchor = msg.read_i32()?;
+                    details = format!("cursor_position (index={}, anchor={})", index, anchor);
+                }
+                9 => {
+                    let index = msg.read_i32()?;
+                    let length = msg.read_u32()?;
+                    details = format!("delete_surrounding_text (index={}, length={})", index, length);
+                }
+                10 => {
+                    let serial = msg.read_u32()?;
+                    let time = msg.read_u32()?;
+                    let sym = msg.read_u32()?;
+                    let state = msg.read_u32()?;
+                    let modifiers = msg.read_u32()?;
+                    details = format!("keysym (serial={}, time={}, sym={:#x}, state={}, modifiers={})", serial, time, sym, state, modifiers);
+                }
+                11 => {
+                    let serial = msg.read_u32()?;
+                    let language = msg.read_string()?;
+                    details = format!("language (serial={}, language={:?})", serial, language);
+                }
+                12 => {
+                    let serial = msg.read_u32()?;
+                    let direction = msg.read_u32()?;
+                    details = format!("text_direction (serial={}, direction={})", serial, direction);
+                }
+                _ => {
+                    details = format!("opcode={}", opcode);
+                }
+            },
+            ("zcr_extended_text_input_v1", _) => match opcode {
+                0 => {
+                    let index = msg.read_i32()?;
+                    let length = msg.read_u32()?;
+                    details = format!("set_preedit_region (index={}, length={})", index, length);
+                }
+                1 => {
+                    let start = msg.read_u32()?;
+                    let end = msg.read_u32()?;
+                    details = format!("clear_grammar_fragments (start={}, end={})", start, end);
+                }
+                2 => {
+                    let start = msg.read_u32()?;
+                    let end = msg.read_u32()?;
+                    let suggestion = msg.read_string()?;
+                    details = format!("add_grammar_fragment (start={}, end={}, suggestion={:?})", start, end, suggestion);
+                }
+                3 => {
+                    let start = msg.read_u32()?;
+                    let end = msg.read_u32()?;
+                    details = format!("set_autocorrect_range (start={}, end={})", start, end);
+                }
+                4 => {
+                    let x = msg.read_i32()?;
+                    let y = msg.read_i32()?;
+                    let width = msg.read_i32()?;
+                    let height = msg.read_i32()?;
+                    details = format!("set_virtual_keyboard_occluded_bounds (x={}, y={}, width={}, height={})", x, y, width, height);
+                }
+                5 => {
+                    let selection_behavior = msg.read_u32()?;
+                    details = format!("confirm_preedit (selection_behavior={})", selection_behavior);
+                }
+                _ => {
+                    details = format!("opcode={}", opcode);
+                }
+            },
+            ("zwp_text_input_v3", Direction::ClientToHost) => match opcode {
+                0 => {
+                    details = "enable".to_string();
+                }
+                1 => {
+                    details = "disable".to_string();
+                }
+                2 => {
+                    let text = msg.read_string()?;
+                    let cursor = msg.read_i32()?;
+                    let anchor = msg.read_i32()?;
+                    details = format!("set_surrounding_text (text={:?}, cursor={}, anchor={})", text, cursor, anchor);
+                }
+                3 => {
+                    let hint = msg.read_u32()?;
+                    let purpose = msg.read_u32()?;
+                    details = format!("set_content_type (hint={}, purpose={})", hint, purpose);
+                }
+                4 => {
+                    let x = msg.read_i32()?;
+                    let y = msg.read_i32()?;
+                    let w = msg.read_i32()?;
+                    let h = msg.read_i32()?;
+                    details = format!("set_cursor_rectangle (x={}, y={}, w={}, h={})", x, y, w, h);
+                }
+                5 => {
+                    details = "commit".to_string();
+                }
+                _ => {
+                    details = format!("opcode={}", opcode);
+                }
+            },
+            ("zwp_text_input_v3", Direction::HostToClient) => match opcode {
+                0 => {
+                    let surface = msg.read_u32()?;
+                    details = format!("enter (surface={})", surface);
+                }
+                1 => {
+                    details = "leave".to_string();
+                }
+                2 => {
+                    let text = msg.read_string()?;
+                    let cursor_begin = msg.read_i32()?;
+                    let cursor_end = msg.read_i32()?;
+                    details = format!("preedit_string (text={:?}, begin={}, end={})", text, cursor_begin, cursor_end);
+                }
+                3 => {
+                    let text = msg.read_string()?;
+                    details = format!("commit_string (text={:?})", text);
+                }
+                4 => {
+                    let before = msg.read_u32()?;
+                    let after = msg.read_u32()?;
+                    details = format!("delete_surrounding_text (before={}, after={})", before, after);
+                }
+                5 => {
+                    let serial = msg.read_u32()?;
+                    details = format!("done (serial={})", serial);
+                }
+                _ => {
+                    details = format!("opcode={}", opcode);
+                }
+            },
+            _ => {
+                details = format!("opcode={}", opcode);
+            }
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = res {
+        details = format!("decode_error: {:?} (opcode={})", e, opcode);
+    }
+
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/sommelier_ime.log")
+    {
+        let time_str = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => format!("{}.{:03}", d.as_secs(), d.subsec_millis()),
+            Err(_) => "0.000".to_string(),
+        };
+        let io_dir = if outgoing { "OUT" } else { "IN" };
+        let _ = writeln!(
+            file,
+            "[{}] [{}] [{:?}] {}: {}",
+            time_str, io_dir, direction, interface, details
+        );
     }
 }
