@@ -130,7 +130,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         &mut self,
         ctx: &mut Context,
         serial: u32,
-        _time: u32,
+        time: u32,
         sym: u32,
         state: u32,
         _modifiers: u32,
@@ -166,8 +166,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 if let Some(&keyboard_id) = keyboards.first() {
                     // Send wl_keyboard::key (opcode 3)
                     let mut builder = crate::wire::MessageBuilder::new();
-                    builder.write_u32(0); // serial
-                    builder.write_u32(0); // time
+                    builder.write_u32(serial); // serial
+                    builder.write_u32(time); // time
                     builder.write_u32(keycode); // key
                     builder.write_u32(state); // state (0: released, 1: pressed)
 
@@ -1016,6 +1016,40 @@ mod tests {
             }
         }
         assert!(found_commit_state);
+    }
+
+    #[test]
+    fn on_keysym_forwards_serial_and_time_to_wl_keyboard() {
+        let (mut ctx, host_v1_id, _guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        // Register a guest wl_keyboard ID to capture the forwarded key
+        let guest_keyboard_id = 999u32;
+        ctx.shadow_table.map_id(guest_keyboard_id, 888);
+        ctx.shadow_table.track_interface(guest_keyboard_id, "wl_keyboard".to_string());
+
+        let mut handler = TextInputV1Handler;
+        // 0xff08 is KEY_BackSpace
+        let action = handler.on_keysym(&mut ctx, 123, 456, 0xff08, 1, 0);
+        assert_eq!(action, Action::Drop);
+
+        // State should store host_serial = 123
+        if let Some(state) = ctx.text_inputs.values().next() {
+            assert_eq!(state.host_serial, 123);
+        } else {
+            panic!("state not found");
+        }
+
+        // Should produce 1 message on host_to_client_queue: wl_keyboard::key (opcode 3)
+        assert_eq!(ctx.host_to_client_queue.len(), 1);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 3);
+        assert_eq!(msg_sender(&ctx.host_to_client_queue, 0), guest_keyboard_id);
+
+        let payload = &ctx.host_to_client_queue[0].0[8..];
+        let serial = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+        let time = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+        assert_eq!(serial, 123);
+        assert_eq!(time, 456);
     }
 }
 
