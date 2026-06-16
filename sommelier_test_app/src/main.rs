@@ -79,6 +79,10 @@ impl eframe::App for App {
         }
     }
 
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        egui::Rgba::from_rgb(0.12, 0.12, 0.12).to_array()
+    }
+
     fn on_exit(&mut self) {
         log::info!("[OnExit] Application closing. Final text buffer: {:?}", self.text);
     }
