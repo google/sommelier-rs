@@ -164,7 +164,27 @@ mod tests {
     }
 
     #[test]
-    fn test_key_events_append_text() {
+    fn test_type_f_twice_end_to_end() {
+        let (ctx, mut app) = setup_app();
+        run_frame(&ctx, &mut app, vec![]);
+
+        run_frame(&ctx, &mut app, vec![
+            Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::default() },
+            Event::Text("f".to_owned()),
+            Event::Key { key: egui::Key::F, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::default() },
+        ]);
+        assert_eq!(app.text, "f", "After first f, got: {:?}", app.text);
+
+        run_frame(&ctx, &mut app, vec![
+            Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::default() },
+            Event::Text("f".to_owned()),
+            Event::Key { key: egui::Key::F, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::default() },
+        ]);
+        assert_eq!(app.text, "ff", "After second f, got: {:?}", app.text);
+    }
+
+    #[test]
+    fn test_type_three_chars_in_one_frame() {
         let (ctx, mut app) = setup_app();
         run_frame(&ctx, &mut app, vec![]);
 
