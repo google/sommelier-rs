@@ -8,3 +8,4 @@ winit = { version = "*", features = ["rwh_06"] }
 softbuffer = "*"
 log = "*"
 env_logger = "*"
+ab_glyph = "*"
