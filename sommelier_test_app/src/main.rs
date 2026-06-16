@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eframe::run_native(
         "Sommelier IME Test",
         options,
-        Box::new(|_cc| Ok(Box::new(App { text: String::new(), auto_exit, started: std::time::Instant::now(), has_focused: false }))),
+        Box::new(|_cc| Ok(Box::new(App { text: String::new(), auto_exit, started: std::time::Instant::now(), has_focused: false, ime_active: false }))),
     )?;
 
     Ok(())
@@ -27,6 +27,7 @@ struct App {
     auto_exit: bool,
     started: std::time::Instant,
     has_focused: bool,
+    ime_active: bool,
 }
 
 impl App {
@@ -56,10 +57,28 @@ impl App {
             _ => log::trace!("[Event] {:?}", event),
         }
     }
+
+    fn fix_input_events(&mut self, events: &mut Vec<Event>) {
+        let needs_enabled = !self.ime_active
+            && events.iter().any(|e| matches!(e, Event::Ime(ImeEvent::Commit(_))))
+            && !events.iter().any(|e| matches!(e, Event::Ime(ImeEvent::Enabled)));
+        if needs_enabled {
+            log::info!("[IME] (synthetic) Enabled — no prior Enabled in this frame");
+            events.insert(0, Event::Ime(ImeEvent::Enabled));
+        }
+        for event in events.iter() {
+            match event {
+                Event::Ime(ImeEvent::Enabled) => self.ime_active = true,
+                Event::Ime(ImeEvent::Disabled) => self.ime_active = false,
+                _ => {}
+            }
+        }
+    }
 }
 
 impl eframe::App for App {
     fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.fix_input_events(&mut raw_input.events);
         for event in &raw_input.events {
             Self::log_event(event);
         }
@@ -115,11 +134,13 @@ mod tests {
             auto_exit: false,
             started: std::time::Instant::now(),
             has_focused: false,
+            ime_active: false,
         };
         (ctx, app)
     }
 
-    fn run_frame(ctx: &egui::Context, app: &mut App, events: Vec<Event>) {
+    fn run_frame(ctx: &egui::Context, app: &mut App, mut events: Vec<Event>) {
+        app.fix_input_events(&mut events);
         let input = RawInput { events, ..Default::default() };
         let _ = ctx.run_ui(input, |ui| app.show_ui(ui));
     }
@@ -136,6 +157,27 @@ mod tests {
                 Event::Ime(ImeEvent::Commit("f".to_owned())),
             ]);
             assert_eq!(app.text.len(), i + 1, "After {} commit(s), got {:?}", i + 1, app.text);
+        }
+
+        assert_eq!(app.text, "fffff", "Expected 5 f's but got: {:?}", app.text);
+    }
+
+    #[test]
+    fn test_ime_commit_without_enabled_now_fixed() {
+        let (ctx, mut app) = setup_app();
+        run_frame(&ctx, &mut app, vec![]);
+
+        let sequence = vec![
+            vec![Event::Ime(ImeEvent::Disabled), Event::Ime(ImeEvent::Commit("f".to_owned()))],
+            vec![Event::Ime(ImeEvent::Disabled), Event::Ime(ImeEvent::Commit("f".to_owned()))],
+            vec![Event::Ime(ImeEvent::Disabled), Event::Ime(ImeEvent::Commit("f".to_owned()))],
+            vec![Event::Ime(ImeEvent::Disabled), Event::Ime(ImeEvent::Commit("f".to_owned()))],
+            vec![Event::Ime(ImeEvent::Disabled), Event::Ime(ImeEvent::Commit("f".to_owned()))],
+        ];
+
+        for (i, frame_events) in sequence.iter().enumerate() {
+            run_frame(&ctx, &mut app, frame_events.clone());
+            assert_eq!(app.text.len(), i + 1, "After commit {} (Disabled+Commit), got {:?}", i + 1, app.text);
         }
 
         assert_eq!(app.text, "fffff", "Expected 5 f's but got: {:?}", app.text);
