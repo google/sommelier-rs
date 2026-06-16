@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-winit = { version = "*", features = ["rwh_06"] }
-softbuffer = "*"
+eframe = "*"
 log = "*"
 env_logger = "*"
-ab_glyph = "*"

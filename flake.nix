@@ -23,10 +23,12 @@
             rust-toolchain
             pkgs.wayland
             pkgs.libxkbcommon
+            pkgs.libglvnd
+            pkgs.mesa
           ];
 
           shellHook = ''
-            export LD_LIBRARY_PATH="${pkgs.wayland}/lib:${pkgs.libxkbcommon}/lib:$LD_LIBRARY_PATH"
+            export LD_LIBRARY_PATH="${pkgs.wayland}/lib:${pkgs.libxkbcommon}/lib:${pkgs.libglvnd}/lib:${pkgs.mesa}/lib:$LD_LIBRARY_PATH"
           '';
         };
       }
