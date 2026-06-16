@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-winit = { version = "*", features = ["rwh_06", "x11"] }
+winit = { version = "*", features = ["rwh_06"] }
 softbuffer = "*"
 log = "*"
 env_logger = "*"
