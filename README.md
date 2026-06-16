@@ -36,13 +36,37 @@ When referring to this project, please use "sommelier-rs" to avoid confusion wit
    chmod +x sommelier-rs-v0.1.1
    ```
 
-4. Run sommelier-rs
+4. Run sommelier-rs manually
 
    ```bash
    ./sommelier-rs-v0.1.1 --virtio-wl /dev/wl0 wayland-0
    ```
 
 5. Run your favourite Wayland app in a separate terminal, it should automatically find and use sommelier-rs to display its windows
+
+### Run at login with systemd
+
+The repository includes a systemd user service for the default virtwl setup:
+
+```bash
+mkdir -p ~/.local/bin ~/.config/systemd/user
+install -m 0755 ./sommelier-rs-v0.1.1 ~/.local/bin/sommelier-rs
+install -m 0644 systemd/user/sommelier-rs.service ~/.config/systemd/user/sommelier-rs.service
+systemctl --user daemon-reload
+systemctl --user enable --now sommelier-rs.service
+```
+
+The service starts at user login and runs:
+
+```bash
+~/.local/bin/sommelier-rs --virtio-wl /dev/wl0 wayland-0
+```
+
+Check its status with:
+
+```bash
+systemctl --user status sommelier-rs.service
+```
 
 ### Build and Run (on a Debian-compatible distro)
 
@@ -84,6 +108,16 @@ To build, run and develop yourself, follow these steps:
 
    ```bash
    target/release/sommelier --virtio-wl /dev/wl0 wayland-0
+   ```
+
+   To use the systemd user service with a locally built binary, install it as:
+
+   ```bash
+   mkdir -p ~/.local/bin ~/.config/systemd/user
+   install -m 0755 target/release/sommelier ~/.local/bin/sommelier-rs
+   install -m 0644 systemd/user/sommelier-rs.service ~/.config/systemd/user/sommelier-rs.service
+   systemctl --user daemon-reload
+   systemctl --user enable --now sommelier-rs.service
    ```
 
 *(Note: Depending on your environment, you may need to stop existing Wayland compositors such as sommelier's Wayland instances with `systemctl --user stop sommelier@0 sommelier@1`).*
