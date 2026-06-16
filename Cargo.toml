@@ -13,5 +13,5 @@
 # limitations under the License.
 
 [workspace]
-members = ["wayland_codegen", "sommelier"]
+members = ["wayland_codegen", "sommelier", "sommelier_test_app"]
 resolver = "2"
