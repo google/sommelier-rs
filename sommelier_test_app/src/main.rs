@@ -11,9 +11,8 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use ab_glyph::{FontArc, PxScale, ScaleFont};
+use ab_glyph::{Font, FontArc, Point, PxScale, ScaleFont};
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalPosition;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::Window;
@@ -78,7 +77,7 @@ impl App {
 
     fn update_title(&self) {
         if let Some(w) = &self.window {
-            w.set_title(format!(
+            w.set_title(&format!(
                 "Sommelier IME Test | Text: {:?} | Preedit: {:?}",
                 self.text, self.preedit
             ));
@@ -86,38 +85,39 @@ impl App {
     }
 
     fn render_text(buffer: &mut [u32], width: usize, height: usize, font: &FontArc, size: PxScale, lines: &[&str]) {
-        let font = font.as_scaled(size);
-        let line_height = font.height().ceil() as usize + 4;
-        let baseline_y = font.ascent().ceil() as i32;
-        let mut y_offset: i32 = 20;
+        let scaled = font.as_scaled(size);
+        let line_height = scaled.height().ceil() as usize + 4;
+        let mut cursor_y: f32 = 20.0;
 
         for line in lines {
-            let mut x_offset: i32 = 16;
-            for glyph in font.layout(line, PxScale { x: size.x, y: size.y }, PhysicalPosition::new(0.0, 0.0)) {
-                if let Some(outline) = font.outline_glyph(glyph) {
+            let mut cursor_x: f32 = 16.0;
+            for ch in line.chars() {
+                let glyph_id = scaled.glyph_id(ch);
+                let glyph = glyph_id.with_scale_and_position(size, Point { x: cursor_x, y: 0.0 });
+                if let Some(outline) = scaled.outline_glyph(glyph) {
                     let bb = outline.px_bounds();
-                    for (px, py) in outline.pixels() {
+                    outline.draw(|px, py, coverage| {
                         let dx = (bb.min.x as i32 + px as i32) as i32;
-                        let dy = (bb.min.y as i32 + py as i32 + y_offset + baseline_y) as i32;
+                        let dy = (bb.min.y as i32 + py as i32 + cursor_y as i32) as i32;
                         if dx >= 0 && dx < width as i32 && dy >= 0 && dy < height as i32 {
                             let idx = dy as usize * width + dx as usize;
                             if idx < buffer.len() {
-                                let alpha = (py as f32 / 255.0 * 255.0) as u8;
+                                let alpha = (coverage * 255.0).clamp(0.0, 255.0) as u32;
                                 let bg = buffer[idx];
-                                let r = ((bg >> 16) & 0xff) as u32 * (255 - alpha as u32) / 255;
-                                let g = ((bg >> 8) & 0xff) as u32 * (255 - alpha as u32) / 255;
-                                let b = (bg & 0xff) as u32 * (255 - alpha as u32) / 255;
-                                let fr = 255u32 * alpha as u32 / 255;
-                                let fg = 255u32 * alpha as u32 / 255;
-                                let fb = 255u32 * alpha as u32 / 255;
+                                let r = ((bg >> 16) & 0xff) * (255 - alpha) / 255;
+                                let g = ((bg >> 8) & 0xff) * (255 - alpha) / 255;
+                                let b = (bg & 0xff) * (255 - alpha) / 255;
+                                let fr = 255u32 * alpha / 255;
+                                let fg = 255u32 * alpha / 255;
+                                let fb = 255u32 * alpha / 255;
                                 buffer[idx] = 0xff000000 | ((r + fr).min(255) << 16) | ((g + fg).min(255) << 8) | (b + fb).min(255);
                             }
                         }
-                    }
+                    });
                 }
-                x_offset += font.h_advance(glyph.id()).ceil() as i32;
+                cursor_x += scaled.h_advance(glyph_id);
             }
-            y_offset += line_height as i32;
+            cursor_y += line_height as f32;
         }
     }
 }
@@ -184,23 +184,20 @@ impl ApplicationHandler for App {
                         0x002c_3e_50u32
                     };
 
-                    // Fill with a simple row-striped background
                     for y in 0..h.get() {
                         let row_start = y as usize * w.get() as usize;
                         let row_end = row_start + w.get() as usize;
                         let color = if y % 24 < 22 {
                             bg_color
                         } else {
-                            // Slightly lighter alternating rows for "lined paper" look
-                            let r = ((bg_color >> 16) & 0xff).min(50);
-                            let g = ((bg_color >> 8) & 0xff).min(50);
-                            let b = (bg_color & 0xff).min(50);
+                            let r = ((bg_color >> 16) & 0xff).saturating_sub(50);
+                            let g = ((bg_color >> 8) & 0xff).saturating_sub(50);
+                            let b = (bg_color & 0xff).saturating_sub(50);
                             (r << 16) | (g << 8) | b
                         };
                         buffer[row_start..row_end].fill(color);
                     }
 
-                    // Render text
                     if let Some(ref font) = self.font {
                         let display = format!("Text: {}", self.text);
                         let preedit_display = if !self.preedit.is_empty() {
@@ -390,7 +387,6 @@ mod tests {
 
     #[test]
     fn update_title_formats_correctly() {
-        let app = App::new(std::iter::empty::<String>());
         let title = format!(
             "Sommelier IME Test | Text: {:?} | Preedit: {:?}",
             "hello", ""
@@ -400,7 +396,6 @@ mod tests {
 
     #[test]
     fn preedit_updates_display() {
-        let app = App::new(std::iter::empty::<String>());
         let title = format!(
             "Sommelier IME Test | Text: {:?} | Preedit: {:?}",
             "hello", " world"
@@ -448,20 +443,28 @@ mod tests {
 
     #[test]
     fn font_loading_does_not_crash() {
-        let app = App::new(std::iter::empty::<String>());
-        let _ = &app.font;
+        let _app = App::new(std::iter::empty::<String>());
     }
 
     #[test]
     fn load_font_from_valid_path() {
-        let font = App::load_font();
-        assert!(font.is_some(), "Expected a font to be loadable from the system");
+        assert!(
+            App::load_font().is_some(),
+            "Expected a font to be loadable from the system"
+        );
     }
 
     #[test]
     fn render_text_with_empty_buffer() {
         let font = App::load_font().expect("font required for this test");
         let mut buffer = [0u32; 100];
-        App::render_text(&mut buffer, 10, 10, &font, PxScale { x: 12.0, y: 12.0 }, &["test"]);
+        App::render_text(
+            &mut buffer,
+            10,
+            10,
+            &font,
+            PxScale { x: 12.0, y: 12.0 },
+            &["test"],
+        );
     }
 }
