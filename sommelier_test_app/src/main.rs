@@ -214,7 +214,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::RawInput as RawInput;
 
     fn setup_app() -> (egui::Context, App) {
         let ctx = egui::Context::default();
