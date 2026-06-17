@@ -154,7 +154,7 @@ pub struct BufferState {
     #[allow(dead_code)]
     pub host_buffer_id: u32,
     #[allow(dead_code)]
-    pub bo: Option<gbm::BufferObject<()>>,
+    pub bo: Option<OwnedFd>,
     #[allow(dead_code)]
     pub dmabuf_fd: Option<OwnedFd>,
     pub bo_stride: u32,
@@ -213,7 +213,7 @@ impl Context {
         let allocator = match Allocator::new() {
             Ok(alloc) => Some(alloc),
             Err(e) => {
-                warn!("Failed to initialize GBM allocator: {}", e);
+                warn!("Failed to initialize fallback SHM allocator: {}", e);
                 None
             }
         };

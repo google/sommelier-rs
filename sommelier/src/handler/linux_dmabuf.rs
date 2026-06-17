@@ -19,10 +19,8 @@ use crate::protocols::linux_dmabuf_v1::zwp_linux_dmabuf_feedback_v1;
 use crate::protocols::linux_dmabuf_v1::zwp_linux_dmabuf_v1;
 use crate::state::{Context, PendingParam};
 use crate::wire::{Action, MessageBuilder};
-use gbm::Format;
-use log::{debug, error, info};
+use log::{debug, error};
 use std::os::fd::BorrowedFd;
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{IntoRawFd, RawFd};
 
 pub struct LinuxDmabufHandler;
@@ -32,9 +30,9 @@ impl LinuxDmabufHandler {
         &self,
         ctx: &mut Context,
         params_id: u32,
-        width: i32,
-        height: i32,
-        format: u32,
+        _width: i32,
+        _height: i32,
+        _format: u32,
         send_create: impl FnOnce(&mut Context, u32),
     ) {
         if let Some(params) = ctx.pending_params.remove(&params_id) {

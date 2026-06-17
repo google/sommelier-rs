@@ -148,47 +148,36 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
                     }
                 }
             } else if let Some(allocator) = &mut ctx.allocator {
-                // Fallback to GBM allocator
+                // Fallback to SHM memfd allocator
                 match allocator.allocate(width as u32, height as u32, format) {
-                    Ok(bo) => {
-                        let bo_stride = bo.stride().unwrap_or(0);
+                    Ok(buf) => {
+                        let bo_stride = buf.stride;
                         debug!(
-                            "Allocated GBM BO: width={}, height={}, stride={}, format={}",
+                            "Allocated SHM memfd: width={}, height={}, stride={}, format={}",
                             width, height, bo_stride, format
                         );
 
-                        let fd = match bo.fd() {
+                        let fd = match buf.fd.try_clone() {
                             Ok(f) => f,
                             Err(e) => {
-                                error!("Failed to get FD from BO: {}", e);
+                                error!("Failed to clone fd: {}", e);
                                 return Action::Drop;
                             }
                         };
 
-                        // For GBM with LINEAR flag, modifier is likely 0 (LINEAR)
-                        // We can try to get it from BO if needed, but for now we default to 0
-                        // as that was the behavior and we want to be safe.
-                        // If we want to be correct:
-                        let modifier: u64 = match bo.modifier() {
-                            Ok(m) => m.into(),
-                            Err(_) => 0,
-                        };
-
-                        debug!("GBM BO modifier: {}", modifier);
-
-                        // FIX: Add offset and calculate size to match the 6-element tuple
+                        let modifier: u64 = 0; // LINEAR
                         let offset = 0;
-                        let total_size = (bo_stride as u64) * (height as u64);
+                        let total_size = buf.size as u64;
 
-                        (Some(bo), bo_stride, fd, modifier, offset, total_size)
+                        (Some(buf.fd), bo_stride, fd, modifier, offset, total_size)
                     }
                     Err(e) => {
-                        error!("Failed to allocate GBM BO: {}", e);
+                        error!("Failed to allocate SHM memfd: {}", e);
                         return Action::Drop;
                     }
                 }
             } else {
-                error!("No allocator (VirtGpu or GBM) available");
+                error!("No allocator (VirtGpu or SHM) available");
                 return Action::Drop;
             };
 

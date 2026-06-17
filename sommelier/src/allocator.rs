@@ -14,88 +14,67 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-use gbm::{BufferObjectFlags, Format};
-use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
 
-/// Allocator for GBM buffers on the host.
-///
-/// This struct manages a GBM device and allows allocating buffers
-/// that can be used for zero-copy sharing with the host compositor.
-pub struct Allocator {
-    pub device: gbm::Device<File>,
+/// Fallback allocator for CPU-accessible SHM buffers in local placeholder mode.
+pub struct Allocator;
+
+pub struct AllocatedBuffer {
+    pub fd: OwnedFd,
+    pub stride: u32,
+    pub size: usize,
 }
 
 impl Allocator {
-    /// Creates a new Allocator instance.
-    ///
-    /// This opens the render node at `/dev/dri/renderD128` and initializes
-    /// a GBM device on top of it.
     pub fn new() -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/dri/renderD128")?;
-
-        let device = gbm::Device::new(file).map_err(io::Error::other)?;
-
-        Ok(Self { device })
+        Ok(Self)
     }
 
-    /// Allocates a new GBM buffer object.
-    ///
-    /// # Arguments
-    ///
-    /// * `width` - The width of the buffer.
-    /// * `height` - The height of the buffer.
-    /// * `format` - The DRM format of the buffer.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the allocated `gbm::BufferObject` or an `io::Error`.
-    pub fn allocate(
-        &self,
-        width: u32,
-        height: u32,
-        format: u32,
-    ) -> io::Result<gbm::BufferObject<()>> {
-        // Convert Wayland SHM format to GBM Format (DrmFourcc)
-        // Wayland defines:
+    pub fn allocate(&self, width: u32, height: u32, format: u32) -> io::Result<AllocatedBuffer> {
+        // Supported Wayland SHM formats:
         // WL_SHM_FORMAT_ARGB8888 = 0
         // WL_SHM_FORMAT_XRGB8888 = 1
-
-        let format = match format {
-            0 => Format::Argb8888,
-            1 => Format::Xrgb8888,
-            val => {
-                // If the value is large, it might be a FourCC code already (e.g. from dmabuf).
-                // However, small values are likely Wayland SHM formats we don't support yet.
-                // We'll try to convert if it looks like a FourCC (usually ASCII chars).
-                if val > 0xff {
-                    Format::try_from(val).map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("Invalid DRM FourCC format: {}", val),
-                        )
-                    })?
-                } else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!("Unsupported Wayland SHM format: {}", val),
-                    ));
-                }
+        let bpp = match format {
+            0 | 1 => 4,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Unsupported Wayland SHM format: {}", format),
+                ));
             }
         };
 
-        // We request a linear buffer layout to ensure it can be mapped if necessary.
-        // Using explicit flags instead of modifiers to guarantee LINEAR usage.
-        self.device
-            .create_buffer_object(
-                width,
-                height,
-                format,
-                BufferObjectFlags::RENDERING | BufferObjectFlags::LINEAR,
+        let stride = width
+            .checked_mul(bpp)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Width overflow"))?;
+        let size = (stride as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Size overflow"))?;
+
+        let memfd_name = b"sommelier-shm\0";
+        let raw_fd = unsafe {
+            libc::memfd_create(
+                memfd_name.as_ptr() as *const libc::c_char,
+                libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
             )
-            .map_err(io::Error::other)
+        };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+
+        if let Err(e) = nix::unistd::ftruncate(&fd, size as i64) {
+            return Err(e.into());
+        }
+
+        // Apply file seals to prevent truncation (SIGBUS vulnerabilities)
+        let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(AllocatedBuffer { fd, stride, size })
     }
 }

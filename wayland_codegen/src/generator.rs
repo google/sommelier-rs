@@ -670,7 +670,7 @@ fn generate_handler_args(items: &[MessageItem]) -> TokenStream {
             let name = format_ident!("_{}", sanitize_ident(&arg.name));
             let ty = map_type(arg);
             if arg.typ == "string" {
-                args.push(quote! { #name: &#ty });
+                args.push(quote! { #name: &str });
             } else if arg.typ == "array" {
                 args.push(quote! { #name: &[u8] });
             } else if arg.typ == "new_id" && arg.interface.is_none() {
@@ -690,7 +690,7 @@ fn generate_handler_args_fq(items: &[MessageItem]) -> TokenStream {
             let name = format_ident!("_{}", sanitize_ident(&arg.name));
             let ty = map_type_fq(arg);
             if arg.typ == "string" {
-                args.push(quote! { #name: &#ty });
+                args.push(quote! { #name: &str });
             } else if arg.typ == "array" {
                 args.push(quote! { #name: &[u8] });
             } else if arg.typ == "new_id" && arg.interface.is_none() {
