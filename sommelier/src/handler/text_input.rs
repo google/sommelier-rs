@@ -116,41 +116,39 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 const { std::cell::RefCell::new(None) };
         }
 
-        let keymap = XKB_CACHE.with(|cache| {
+        let found_keycode = XKB_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             if cache.is_none() {
-                let ctx = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
+                let xkb_ctx = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
                 if let Some(km) = xkbcommon::xkb::Keymap::new_from_names(
-                    &ctx, "", "", "", "", None, xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+                    &xkb_ctx, "", "", "", "", None, xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
                 ) {
-                    *cache = Some((ctx, km));
+                    *cache = Some((xkb_ctx, km));
                 }
             }
-            cache.as_ref().map(|(_, km)| km as *const xkbcommon::xkb::Keymap)
+            let mut found = None;
+            if let Some((_, keymap)) = cache.as_ref() {
+                for keycode_raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
+                    let keycode = keycode_raw.into();
+                    let syms = keymap.key_get_syms_by_level(keycode, 0, 0);
+                    if syms.iter().any(|s| s.raw() == sym) {
+                        found = Some(keycode_raw - 8);
+                        break;
+                    }
+                }
+            }
+            found
         });
 
-        if let Some(keymap_ptr) = keymap {
-            let keymap = unsafe { &*keymap_ptr };
-            let mut found_keycode = None;
-            for keycode_raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
-                let keycode = keycode_raw.into();
-                let syms = keymap.key_get_syms_by_level(keycode, 0, 0);
-                if syms.iter().any(|s| s.raw() == sym) {
-                    found_keycode = Some(keycode_raw - 8);
-                    break;
-                }
-            }
-
-            if let Some(keycode) = found_keycode {
-                let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
-                if let Some(&keyboard_id) = keyboards.first() {
-                    let mut b = MessageBuilder::new();
-                    b.write_u32(serial);
-                    b.write_u32(time);
-                    b.write_u32(keycode);
-                    b.write_u32(state);
-                    queue_host_msg(ctx, keyboard_id, 3, b);
-                }
+        if let Some(keycode) = found_keycode {
+            let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
+            if let Some(&keyboard_id) = keyboards.first() {
+                let mut b = MessageBuilder::new();
+                b.write_u32(serial);
+                b.write_u32(time);
+                b.write_u32(keycode);
+                b.write_u32(state);
+                queue_host_msg(ctx, keyboard_id, 3, b);
             }
         }
         Action::Drop
@@ -472,9 +470,10 @@ pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
         if a.target_activated != prev_activated {
             if a.target_activated {
                 log::info!(
-                    "update_host_activation: activating text input v1 (guest_id={}, host_v1_id={})",
+                    "update_host_activation: activating text input v1 (guest_id={}, host_v1_id={}, host_surface={})",
                     guest_id,
                     a.host_v1_id,
+                    a.host_surface,
                 );
                 let mut b = MessageBuilder::new();
                 b.write_u32(a.host_seat);
