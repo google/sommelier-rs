@@ -28,6 +28,11 @@ use std::ptr;
 /// Opcodes for internally-constructed zaura_shell wire messages.
 /// These are stable per Wayland protocol versioning rules (append-only).
 /// Source: chromiumos/platform2 aura-shell.xml
+///
+/// Version requirements:
+/// - set_application_id (opcode 4): available since v5
+/// - release (opcode 27): available since v38
+/// We bind at min(version, 38) in registry.rs, so all opcodes are valid.
 const ZAURA_SHELL_GET_AURA_SURFACE: u16 = 0;
 const ZAURA_SURFACE_SET_APPLICATION_ID: u16 = 4;
 const ZAURA_SURFACE_RELEASE: u16 = 27;
@@ -151,8 +156,8 @@ impl WlSubsurfaceHandler for CompositorHandler {}
 // the underlying wl_surface and create/reuse a host zaura_surface on it.
 
 impl crate::protocols::xdg_shell::xdg_wm_base::XdgWmBaseHandler for CompositorHandler {
-    fn on_get_xdg_surface(&mut self, ctx: &mut Context, _id: u32, _surface: u32) -> Action {
-        ctx.xdg_surface_to_wl_surface.insert(_id, _surface);
+    fn on_get_xdg_surface(&mut self, ctx: &mut Context, id: u32, surface: u32) -> Action {
+        ctx.xdg_surface_to_wl_surface.insert(id, surface);
         Action::Forward
     }
 }
@@ -180,7 +185,7 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
         Action::Forward
     }
 
-    fn on_set_app_id(&mut self, ctx: &mut Context, _app_id: &String) -> Action {
+    fn on_set_app_id(&mut self, ctx: &mut Context, app_id: &String) -> Action {
         let xdg_toplevel_id = ctx.last_sender_id;
 
         // Resolve xdg_toplevel → wl_surface (guest) → wl_surface (host).
@@ -221,7 +226,7 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
                 if zaura_surface_host_id != 0 {
                     let formatted_app_id = format!(
                         "org.chromium.guest_os.{}.wayland.{}",
-                        ctx.vm_identifier, _app_id
+                        ctx.vm_identifier, app_id
                     );
 
                     let mut builder = crate::wire::MessageBuilder::new();
@@ -234,7 +239,7 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
                     ctx.client_to_host_queue.push((msg, Vec::new()));
                     log::debug!(
                         "Set application ID to {} (formatted: {}) on zaura_surface (host_id={})",
-                        _app_id,
+                        app_id,
                         formatted_app_id,
                         zaura_surface_host_id
                     );
@@ -242,5 +247,137 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
             }
         }
         Action::Forward
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler;
+    use crate::state::Context;
+
+    fn msg_sender(msg: &[u8]) -> u32 {
+        u32::from_ne_bytes(msg[0..4].try_into().unwrap())
+    }
+
+    fn msg_opcode(msg: &[u8]) -> u16 {
+        let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
+        (word2 & 0xffff) as u16
+    }
+
+    fn setup_ctx() -> (Context, u32, u32, u32) {
+        let mut ctx = Context::new_for_test(false, false, vec![]);
+        let wl_surface_guest = 100u32;
+        let wl_surface_host = 200u32;
+        let zaura_shell_host = 300u32;
+        let xdg_toplevel_id = 400u32;
+        let xdg_surface_id = 500u32;
+
+        ctx.shadow_table.map_id(wl_surface_guest, wl_surface_host);
+        ctx.host_zaura_shell_id = Some(zaura_shell_host);
+        ctx.xdg_surface_to_wl_surface
+            .insert(xdg_surface_id, wl_surface_guest);
+        ctx.xdg_toplevel_to_wl_surface
+            .insert(xdg_toplevel_id, wl_surface_guest);
+
+        (ctx, xdg_toplevel_id, zaura_shell_host, wl_surface_host)
+    }
+
+    #[test]
+    fn set_app_id_creates_zaura_surface_and_sets_app_id() {
+        let (mut ctx, xdg_toplevel_id, zaura_shell_host, _wl_surface_host) = setup_ctx();
+        ctx.last_sender_id = xdg_toplevel_id;
+
+        let mut handler = CompositorHandler;
+        let action = handler.on_set_app_id(&mut ctx, &"my_app".to_string());
+        assert_eq!(action, Action::Forward);
+
+        assert_eq!(ctx.client_to_host_queue.len(), 2);
+
+        let msg0 = &ctx.client_to_host_queue[0].0;
+        assert_eq!(msg_sender(msg0), zaura_shell_host);
+        assert_eq!(msg_opcode(msg0), 0);
+
+        let msg1 = &ctx.client_to_host_queue[1].0;
+        assert_eq!(msg_opcode(msg1), 4);
+        let payload = &msg1[8..];
+        let str_len = u32::from_ne_bytes(payload[0..4].try_into().unwrap()) as usize;
+        let app_id_str = String::from_utf8(payload[4..4 + str_len - 1].to_vec()).unwrap();
+        assert!(app_id_str.starts_with("org.chromium.guest_os."));
+        assert!(app_id_str.ends_with(".wayland.my_app"));
+    }
+
+    #[test]
+    fn set_app_id_reuses_existing_zaura_surface() {
+        let (mut ctx, xdg_toplevel_id, _zaura_shell_host, wl_surface_host) = setup_ctx();
+        ctx.last_sender_id = xdg_toplevel_id;
+
+        let zaura_surface_host = 99u32;
+        ctx.wl_surface_to_zaura_surface
+            .insert(wl_surface_host, zaura_surface_host);
+
+        let mut handler = CompositorHandler;
+        let action = handler.on_set_app_id(&mut ctx, &"reused".to_string());
+        assert_eq!(action, Action::Forward);
+
+        assert_eq!(ctx.client_to_host_queue.len(), 1);
+        assert_eq!(msg_opcode(&ctx.client_to_host_queue[0].0), 4);
+        assert_eq!(msg_sender(&ctx.client_to_host_queue[0].0), zaura_surface_host);
+    }
+
+    #[test]
+    fn set_app_id_noop_when_no_zaura_shell() {
+        let (mut ctx, xdg_toplevel_id, _zaura_shell_host, _wl_surface_host) = setup_ctx();
+        ctx.host_zaura_shell_id = None;
+        ctx.last_sender_id = xdg_toplevel_id;
+
+        let mut handler = CompositorHandler;
+        let action = handler.on_set_app_id(&mut ctx, &"no_shell".to_string());
+        assert_eq!(action, Action::Forward);
+        assert_eq!(ctx.client_to_host_queue.len(), 0);
+    }
+
+    #[test]
+    fn xdg_toplevel_destroy_cleans_up_map() {
+        let (mut ctx, xdg_toplevel_id, _zaura_shell_host, _wl_surface_host) = setup_ctx();
+
+        let mut handler = CompositorHandler;
+        ctx.last_sender_id = xdg_toplevel_id;
+
+        assert!(ctx.xdg_toplevel_to_wl_surface.contains_key(&xdg_toplevel_id));
+
+        ctx.last_sender_id = xdg_toplevel_id;
+        let action = XdgToplevelHandler::on_destroy(&mut handler, &mut ctx);
+        assert_eq!(action, Action::Forward);
+
+        assert!(!ctx.xdg_toplevel_to_wl_surface.contains_key(&xdg_toplevel_id));
+    }
+
+    #[test]
+    fn wl_surface_destroy_releases_zaura_surface() {
+        let (mut ctx, xdg_toplevel_id, _zaura_shell_host, wl_surface_host) = setup_ctx();
+
+        ctx.last_sender_id = xdg_toplevel_id;
+        let mut handler = CompositorHandler;
+        handler.on_set_app_id(&mut ctx, &"app".to_string());
+
+        let zaura_surface_host = *ctx
+            .wl_surface_to_zaura_surface
+            .get(&wl_surface_host)
+            .unwrap();
+
+        let wl_surface_guest = 100u32;
+        ctx.last_sender_id = wl_surface_guest;
+        let action = WlSurfaceHandler::on_destroy(&mut handler, &mut ctx);
+        assert_eq!(action, Action::Forward);
+
+        let release_msg = ctx
+            .client_to_host_queue
+            .iter()
+            .find(|(msg, _)| msg_opcode(msg) == 27);
+        assert!(release_msg.is_some());
+        assert_eq!(msg_sender(&release_msg.unwrap().0), zaura_surface_host);
+
+        assert!(!ctx.wl_surface_to_zaura_surface.contains_key(&wl_surface_host));
     }
 }
