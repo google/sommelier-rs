@@ -383,6 +383,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // host, which enables ack mode (SetNeedKeyboardKeyAcks(true) in Exo).
         Self::ensure_extended_keyboard_bound(ctx, host_keyboard_id);
 
+        // Defer activation updates until after the loop so we don't borrow ctx
+        // while iterating over text_inputs.
         let mut text_inputs_to_update = Vec::new();
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
@@ -405,6 +407,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             }
         }
 
+        // Now safe to call update_host_activation (borrows ctx mutably).
         for id in text_inputs_to_update {
             crate::handler::text_input::update_host_activation(ctx, id);
         }
@@ -418,6 +421,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
+        // Same deferred pattern as on_enter.
         let mut text_inputs_to_update = Vec::new();
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
@@ -439,6 +443,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             }
         }
 
+        // Same deferred pattern as on_enter.
         for id in text_inputs_to_update {
             crate::handler::text_input::update_host_activation(ctx, id);
         }

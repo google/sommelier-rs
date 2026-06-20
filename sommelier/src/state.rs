@@ -311,15 +311,15 @@ pub struct TextInputState {
     pub enabled: bool,
     pub enabled_changed: bool,
     pub surrounding_text: Option<(String, i32, i32)>,
-    pub surrounding_text_dirty: bool,
+    pub surrounding_text_dirty: bool,   // set by on_set_surrounding_text, consumed by commit
     pub content_hint: u32,
     pub content_purpose: u32,
     pub cursor_rect: Option<(i32, i32, i32, i32)>,
     pub text_change_cause: u32,
-    pub current_preedit: String,
-    pub commit_serial: u32,
-    pub host_serial: u32,
-    pub host_activated: bool,
+    pub current_preedit: String,         // cached between set_preedit_region and confirm_preedit
+    pub commit_serial: u32,              // incremented on each commit, wrapped to 0→1
+    pub host_serial: u32,                // last serial from host (preedit/commit/keysym/language/direction)
+    pub host_activated: bool,            // whether we sent activate to the host
 }
 
 pub struct Context {

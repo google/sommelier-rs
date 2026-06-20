@@ -23,6 +23,9 @@ use crate::protocols::text_input_unstable_v3::zwp_text_input_v3;
 use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
 
+// Helpers that eliminate repetitive wire-format construction.
+// host→client messages go to the guest's virtual input device (e.g. synthetic keyboard events).
+// client→host messages go to the host compositor (e.g. activate, commit_state).
 fn queue_host_msg(ctx: &mut Context, sender_id: u32, opcode: u16, builder: MessageBuilder) {
     ctx.host_to_client_queue
         .push((builder.build_message(sender_id, opcode), Vec::new()));
@@ -47,6 +50,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     ) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            // Track the host serial so commit_state can forward it back.
+            // Needed by ChromeOS/Exo to validate the commit sequence.
             let commit_serial = if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
                 state.host_serial = serial;
                 state.current_preedit = text.clone();
@@ -55,12 +60,14 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 0
             };
 
+            // v3 preedit_string (opcode 2): cursor_end = text.len() selects entire preedit.
             let mut b = MessageBuilder::new();
             b.write_string(text);
             b.write_i32(0);
             b.write_i32(text.len() as i32);
             queue_host_msg(ctx, guest_id, 2, b);
 
+            // v3 done (opcode 5): signals the guest that the preedit update is complete.
             let mut b = MessageBuilder::new();
             b.write_u32(commit_serial);
             queue_host_msg(ctx, guest_id, 5, b);
@@ -79,16 +86,20 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 0
             };
 
+            // Explicitly clear preedit before commit (v3 preedit_string "").
+            // Without this, the guest may keep stale underline after commit.
             let mut b = MessageBuilder::new();
             b.write_string("");
             b.write_i32(0);
             b.write_i32(0);
             queue_host_msg(ctx, guest_id, 2, b);
 
+            // v3 commit_string (opcode 3).
             let mut b = MessageBuilder::new();
             b.write_string(text);
             queue_host_msg(ctx, guest_id, 3, b);
 
+            // v3 done (opcode 5) with serial.
             let mut b = MessageBuilder::new();
             b.write_u32(commit_serial);
             queue_host_msg(ctx, guest_id, 5, b);
@@ -111,6 +122,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 s.host_serial = serial;
             }
         }
+
+        // Cache XKB context/keymap per thread to avoid recompiling on each key repeat.
         thread_local! {
             static XKB_CACHE: std::cell::RefCell<Option<(xkbcommon::xkb::Context, xkbcommon::xkb::Keymap)>> =
                 const { std::cell::RefCell::new(None) };
@@ -126,6 +139,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                     *cache = Some((xkb_ctx, km));
                 }
             }
+            // Entire lookup stays inside `with()` so the RefCell borrow is dropped
+            // before returning — no raw pointer escape across the thread_local boundary.
             let mut found = None;
             if let Some((_, keymap)) = cache.as_ref() {
                 for keycode_raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
@@ -140,6 +155,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             found
         });
 
+        // Forward the key event to the guest wl_keyboard with the real serial/time.
+        // Previously hardcoded 0 for both, which caused ChromeOS/Exo to reject events.
         if let Some(keycode) = found_keycode {
             let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
             if let Some(&keyboard_id) = keyboards.first() {
@@ -202,6 +219,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 0
             };
 
+            // Clamp u32→i32 to avoid panic on impossible lengths.
             let length_i32 = i32::try_from(length).unwrap_or_else(|_| {
                 log::warn!(
                     "on_delete_surrounding_text: length {} exceeds i32::MAX, clamping",
@@ -210,7 +228,9 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 i32::MAX
             });
 
-            // Safety: negate via i64 to avoid i32::MIN overflow.
+            // Convert v3's cursor-relative index to v1's before/after lengths.
+            // index < 0 means delete before cursor; use i64 to avoid i32::MIN overflow
+            // when negating (-i32::MIN == i32::MIN due to two's complement).
             let before_length = if index < 0 {
                 (-(index as i64)) as u32
             } else {
@@ -222,11 +242,13 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 0
             };
 
+            // v1 delete_surrounding_text (opcode 4): before_length, after_length.
             let mut b = MessageBuilder::new();
             b.write_u32(before_length);
             b.write_u32(after_length);
             queue_host_msg(ctx, guest_id, 4, b);
 
+            // v3 done (opcode 5) to commit the delete.
             let mut b = MessageBuilder::new();
             b.write_u32(commit_serial);
             queue_host_msg(ctx, guest_id, 5, b);
@@ -237,6 +259,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_language(&mut self, ctx: &mut Context, serial: u32, _language: &String) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            // Track serial so the next commit_state sends it to the host.
             if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
                 s.host_serial = serial;
             }
@@ -247,6 +270,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_text_direction(&mut self, ctx: &mut Context, serial: u32, _direction: u32) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+            // Track serial so the next commit_state sends it to the host.
             if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
                 s.host_serial = serial;
             }
@@ -260,6 +284,8 @@ impl zcr_text_input_extension_v1::ZcrTextInputExtensionV1Handler for TextInputEx
 
 pub struct ExtendedTextInputV1Handler;
 impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextInputV1Handler {
+    // Translates zcr_extended_text_input_v1::set_preedit_region (cursor-relative index/length)
+    // into zwp_text_input_v1::delete_surrounding_text + preedit_string + done.
     fn on_set_preedit_region(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
 
@@ -271,6 +297,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             preedit_text: String,
         }
 
+        // Lookup by host_ext_id because this event arrives on the extended text input protocol.
         let action = ctx
             .text_inputs
             .iter_mut()
@@ -283,6 +310,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                 let start_idx = cursor_i64 + index_i64;
                 let length_i64 = length as i64;
 
+                // Validate bounds and char boundaries for CJK safety.
                 if start_idx >= 0
                     && start_idx + length_i64 <= text.len() as i64
                     && text.is_char_boundary(start_idx as usize)
@@ -310,6 +338,8 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                 }
             });
 
+        // Send three v1 messages: delete_surrounding_text to replace the region,
+        // preedit_string to display highlighted text, and done to commit.
         if let Some(a) = action {
             let mut b = MessageBuilder::new();
             b.write_u32(a.before_length);
@@ -354,6 +384,8 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     ) -> Action {
         Action::Drop
     }
+    // Commits the cached preedit text to the guest as a v3 commit_string + done sequence.
+    // The preedit was cached by on_set_preedit_region; no surrounding_text needed here.
     fn on_confirm_preedit(&mut self, ctx: &mut Context, _selection_behavior: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
         let confirm = ctx
@@ -368,6 +400,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             });
 
         if let Some((guest_id, preedit_text, commit_serial)) = confirm {
+            // Skip empty commits to avoid confusing the guest.
             if !preedit_text.is_empty() {
                 let mut b = MessageBuilder::new();
                 b.write_string(&preedit_text);
@@ -437,6 +470,9 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
     }
 }
 
+// Decouples host-side text-input activation from the v3 on_commit lifecycle.
+// Called from keyboard enter/leave after setting active_surface, so we never
+// send activate with a null surface even if the client commits before focus.
 pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
     struct ActivationAction {
         host_v1_id: u32,
@@ -445,6 +481,7 @@ pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
         target_activated: bool,
     }
 
+    // Immutable get(): the borrow is dropped before the later get_mut().
     let action = ctx.text_inputs.get(&guest_id).map(|state| {
         let host_seat = ctx.shadow_table.get_host_id(state.guest_seat).unwrap_or(0);
         let host_surface = state
@@ -490,6 +527,7 @@ pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
                 queue_client_msg(ctx, a.host_v1_id, 1, b);
             }
 
+            // Separate get_mut() call — immutable borrow from action is already dropped.
             if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
                 state.host_activated = a.target_activated;
             }
@@ -564,13 +602,17 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         Action::Drop
     }
 
+    // Translates zwp_text_input_v3::commit into a batch of zwp_text_input_v1 messages.
+    // The serial is incremented before update_host_activation so activation uses it.
     fn on_commit(&mut self, ctx: &mut Context) -> Action {
         let guest_id = ctx.last_sender_id;
 
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            // wrapping_add prevents panic on overflow; .max(1) avoids serial 0 (unset state).
             state.commit_serial = state.commit_serial.wrapping_add(1).max(1);
         }
 
+        // May send activate/deactivate to the host if enabled/surface changed.
         update_host_activation(ctx, guest_id);
 
         // Extract all state values while holding the mutable borrow, then drop it
@@ -589,12 +631,14 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             CommitActions {
                 host_v1_id: state.host_v1_id,
                 host_ext_id: state.host_ext_id,
+                // Only send surrounding text if it changed (dirty flag).
                 text_info: if state.surrounding_text_dirty {
                     state.surrounding_text_dirty = false;
                     state.surrounding_text.clone()
                 } else {
                     None
                 },
+                // content_hint/purpose are consumed once and reset after sending.
                 content_type: if state.content_hint != 0 || state.content_purpose != 0 {
                     let hint = state.content_hint;
                     let purpose = state.content_purpose;
@@ -610,6 +654,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         });
 
         if let Some(a) = actions {
+            // set_surrounding_text (opcode 5) on v1.
             if let Some((text, cursor, anchor)) = a.text_info {
                 let mut b = MessageBuilder::new();
                 b.write_string(&text);
@@ -618,12 +663,14 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 queue_client_msg(ctx, a.host_v1_id, 5, b);
             }
 
+            // set_content_type (opcode 6) on v1 + set_input_type (opcode 6) on extended.
             if let Some((hint, purpose)) = a.content_type {
                 let mut b = MessageBuilder::new();
                 b.write_u32(hint);
                 b.write_u32(purpose);
                 queue_client_msg(ctx, a.host_v1_id, 6, b);
 
+                // Map zwp_text_input_v3 content purpose → zcr_extended_text_input_v1 input type.
                 let input_type = match purpose {
                     0 | 1 | 7 => 1,
                     2 | 3 => 2,
