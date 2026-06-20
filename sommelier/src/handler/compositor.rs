@@ -169,10 +169,10 @@ impl crate::protocols::xdg_shell::xdg_surface::XdgSurfaceHandler for CompositorH
         Action::Forward
     }
 
-    fn on_get_toplevel(&mut self, ctx: &mut Context, _id: u32) -> Action {
+    fn on_get_toplevel(&mut self, ctx: &mut Context, id: u32) -> Action {
         let xdg_surface_id = ctx.last_sender_id;
         if let Some(&wl_surface_id) = ctx.xdg_surface_to_wl_surface.get(&xdg_surface_id) {
-            ctx.xdg_toplevel_to_wl_surface.insert(_id, wl_surface_id);
+            ctx.xdg_toplevel_to_wl_surface.insert(id, wl_surface_id);
         }
         Action::Forward
     }
