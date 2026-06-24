@@ -27,6 +27,7 @@ mod virtwl_channel;
 mod wire;
 
 mod protocols {
+    #![allow(unused_macros)]
     include!(concat!(env!("OUT_DIR"), "/wayland_protocol.rs"));
     include!(concat!(env!("OUT_DIR"), "/xdg_shell_protocol.rs"));
     include!(concat!(env!("OUT_DIR"), "/linux_dmabuf_v1_protocol.rs"));
@@ -52,7 +53,6 @@ mod protocols {
         env!("OUT_DIR"),
         "/keyboard_extension_unstable_v1_protocol.rs"
     ));
-    #[allow(unused_macros)]
     include!(concat!(env!("OUT_DIR"), "/aura_shell_protocol.rs"));
 }
 
