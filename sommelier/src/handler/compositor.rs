@@ -332,6 +332,27 @@ mod tests {
     }
 
     #[test]
+    fn set_app_id_noop_when_version_below_5() {
+        let (mut ctx, xdg_toplevel_id, _zaura_shell_host, wl_surface_host) = setup_ctx();
+        ctx.host_zaura_shell_version = 4;
+        ctx.last_sender_id = xdg_toplevel_id;
+
+        let mut handler = CompositorHandler;
+        let action = handler.on_set_app_id(&mut ctx, &"old_host".to_string());
+        assert_eq!(action, Action::Forward);
+
+        // get_aura_surface is sent (always available), but set_application_id is skipped.
+        assert_eq!(ctx.client_to_host_queue.len(), 1);
+        assert_eq!(
+            msg_opcode(&ctx.client_to_host_queue[0].0),
+            REQ_GET_AURA_SURFACE
+        );
+
+        // zaura_surface should still be tracked for cleanup
+        assert!(ctx.wl_surface_to_zaura_surface.contains_key(&wl_surface_host));
+    }
+
+    #[test]
     fn xdg_toplevel_destroy_cleans_up_map() {
         let (mut ctx, xdg_toplevel_id, _zaura_shell_host, _wl_surface_host) = setup_ctx();
 

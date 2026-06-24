@@ -52,6 +52,7 @@ mod protocols {
         env!("OUT_DIR"),
         "/keyboard_extension_unstable_v1_protocol.rs"
     ));
+    #[allow(unused_macros)]
     include!(concat!(env!("OUT_DIR"), "/aura_shell_protocol.rs"));
 }
 
