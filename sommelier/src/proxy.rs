@@ -155,7 +155,7 @@ impl Client {
             protocols::fractional_scale_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface)
         {
-            protocols::keyboard_extension_unstable_v1::dispatch_event(
+            protocols::keyboard_extension_unstable_v1::dispatch_request(
                 interface, msg, handler, ctx,
             )
         } else if protocols::aura_shell::ALLOWED_INTERFACES.contains(&interface) {
