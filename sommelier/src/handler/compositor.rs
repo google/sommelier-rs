@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use crate::protocols::aura_shell::zaura_shell::REQ_GET_AURA_SURFACE;
+use crate::protocols::aura_shell::zaura_surface::REQ_RELEASE;
+use crate::protocols::aura_shell::zaura_surface::REQ_SET_APPLICATION_ID;
 use crate::protocols::wayland::wl_compositor::WlCompositorHandler;
 use crate::protocols::wayland::wl_region::WlRegionHandler;
 use crate::protocols::wayland::wl_subcompositor::WlSubcompositorHandler;
@@ -24,18 +27,6 @@ use crate::wire::Action;
 use log::debug;
 use std::cmp;
 use std::ptr;
-
-/// Opcodes for internally-constructed zaura_shell wire messages.
-/// These are stable per Wayland protocol versioning rules (append-only).
-/// Source: chromiumos/platform2 aura-shell.xml
-///
-/// Version requirements:
-/// - set_application_id (opcode 4): available since v5
-/// - release (opcode 27): available since v38
-/// We bind at min(version, 38) in registry.rs, so all opcodes are valid.
-const ZAURA_SHELL_GET_AURA_SURFACE: u16 = 0;
-const ZAURA_SURFACE_SET_APPLICATION_ID: u16 = 4;
-const ZAURA_SURFACE_RELEASE: u16 = 27;
 
 pub struct CompositorHandler;
 
@@ -50,7 +41,7 @@ impl WlSurfaceHandler for CompositorHandler {
                 let builder = crate::wire::MessageBuilder::new();
                 let msg = builder.build_message(
                     zaura_surface_host_id,
-                    ZAURA_SURFACE_RELEASE,
+                    REQ_RELEASE,
                 );
                 ctx.client_to_host_queue.push((msg, Vec::new()));
                 ctx.shadow_table.remove_host_interface(zaura_surface_host_id);
@@ -211,7 +202,7 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
 
                     let msg = builder.build_message(
                         zaura_shell_host_id,
-                        ZAURA_SHELL_GET_AURA_SURFACE,
+                        REQ_GET_AURA_SURFACE,
                     );
                     ctx.client_to_host_queue.push((msg, Vec::new()));
 
@@ -234,7 +225,7 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
 
                     let msg = builder.build_message(
                         zaura_surface_host_id,
-                        ZAURA_SURFACE_SET_APPLICATION_ID,
+                        REQ_SET_APPLICATION_ID,
                     );
                     ctx.client_to_host_queue.push((msg, Vec::new()));
                     log::debug!(
@@ -253,6 +244,9 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::aura_shell::zaura_shell::REQ_GET_AURA_SURFACE;
+    use crate::protocols::aura_shell::zaura_surface::REQ_RELEASE;
+    use crate::protocols::aura_shell::zaura_surface::REQ_SET_APPLICATION_ID;
     use crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler;
     use crate::state::Context;
 
@@ -296,10 +290,10 @@ mod tests {
 
         let msg0 = &ctx.client_to_host_queue[0].0;
         assert_eq!(msg_sender(msg0), zaura_shell_host);
-        assert_eq!(msg_opcode(msg0), 0);
+        assert_eq!(msg_opcode(msg0), REQ_GET_AURA_SURFACE);
 
         let msg1 = &ctx.client_to_host_queue[1].0;
-        assert_eq!(msg_opcode(msg1), 4);
+        assert_eq!(msg_opcode(msg1), REQ_SET_APPLICATION_ID);
         let payload = &msg1[8..];
         let str_len = u32::from_ne_bytes(payload[0..4].try_into().unwrap()) as usize;
         let app_id_str = String::from_utf8(payload[4..4 + str_len - 1].to_vec()).unwrap();
@@ -321,7 +315,7 @@ mod tests {
         assert_eq!(action, Action::Forward);
 
         assert_eq!(ctx.client_to_host_queue.len(), 1);
-        assert_eq!(msg_opcode(&ctx.client_to_host_queue[0].0), 4);
+        assert_eq!(msg_opcode(&ctx.client_to_host_queue[0].0), REQ_SET_APPLICATION_ID);
         assert_eq!(msg_sender(&ctx.client_to_host_queue[0].0), zaura_surface_host);
     }
 
@@ -374,7 +368,7 @@ mod tests {
         let release_msg = ctx
             .client_to_host_queue
             .iter()
-            .find(|(msg, _)| msg_opcode(msg) == 27);
+            .find(|(msg, _)| msg_opcode(msg) == REQ_RELEASE);
         assert!(release_msg.is_some());
         assert_eq!(msg_sender(&release_msg.unwrap().0), zaura_surface_host);
 
