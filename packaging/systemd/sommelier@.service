@@ -1,0 +1,12 @@
+[Unit]
+Description=Sommelier virtwl proxy for %i
+Documentation=https://github.com/google/sommelier-rs
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env sommelier --virtio-wl /dev/wl0 %i
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
