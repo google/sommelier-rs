@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Source: chromiumos/platform2 vm_tools/sommelier/protocol/aura-shell.xml
+  https://chromium.googlesource.com/chromiumos/platform2/+/HEAD/vm_tools/sommelier/protocol/aura-shell.xml
+  Fetched: 2026-06-25
+-->
 <protocol name="aura_shell">
 
   <copyright>

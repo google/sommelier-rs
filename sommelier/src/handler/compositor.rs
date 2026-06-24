@@ -38,12 +38,11 @@ impl WlSurfaceHandler for CompositorHandler {
         // Clean up any host-side zaura_surface we created for this wl_surface.
         if let Some(wl_surface_host_id) = ctx.shadow_table.get_host_id(wl_surface_guest_id) {
             if let Some(zaura_surface_host_id) = ctx.wl_surface_to_zaura_surface.remove(&wl_surface_host_id) {
-                let builder = crate::wire::MessageBuilder::new();
-                let msg = builder.build_message(
-                    zaura_surface_host_id,
-                    REQ_RELEASE,
-                );
-                ctx.client_to_host_queue.push((msg, Vec::new()));
+                if ctx.host_zaura_shell_version >= 38 {
+                    let builder = crate::wire::MessageBuilder::new();
+                    let msg = builder.build_message(zaura_surface_host_id, REQ_RELEASE);
+                    ctx.client_to_host_queue.push((msg, Vec::new()));
+                }
                 ctx.shadow_table.remove_host_interface(zaura_surface_host_id);
             }
         }
@@ -214,7 +213,7 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
                     0
                 };
 
-                if zaura_surface_host_id != 0 {
+                if zaura_surface_host_id != 0 && ctx.host_zaura_shell_version >= 5 {
                     let formatted_app_id = format!(
                         "org.chromium.guest_os.{}.wayland.{}",
                         ctx.vm_identifier, app_id
@@ -269,6 +268,7 @@ mod tests {
 
         ctx.shadow_table.map_id(wl_surface_guest, wl_surface_host);
         ctx.host_zaura_shell_id = Some(zaura_shell_host);
+        ctx.host_zaura_shell_version = 38;
         ctx.xdg_surface_to_wl_surface
             .insert(xdg_surface_id, wl_surface_guest);
         ctx.xdg_toplevel_to_wl_surface

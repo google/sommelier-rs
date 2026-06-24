@@ -160,7 +160,9 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             // Not exposed to the guest; capped at v38 (need v5 for
             // set_application_id, v38 for release destructor).
             let host_id = ctx.shadow_table.allocate_host_id();
+            let bound_version = std::cmp::min(version, 38);
             ctx.host_zaura_shell_id = Some(host_id);
+            ctx.host_zaura_shell_version = bound_version;
             ctx.shadow_table
                 .track_host_interface(host_id, "zaura_shell".to_string());
 
@@ -168,7 +170,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             let mut builder = MessageBuilder::new();
             builder.write_u32(name);
             builder.write_string(interface);
-            builder.write_u32(std::cmp::min(version, 38));
+            builder.write_u32(bound_version);
             builder.write_u32(host_id);
 
             let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);

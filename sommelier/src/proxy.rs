@@ -155,9 +155,14 @@ impl Client {
             protocols::fractional_scale_v1::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface)
         {
-            protocols::keyboard_extension_unstable_v1::dispatch_request(
+            protocols::keyboard_extension_unstable_v1::dispatch_event(
                 interface, msg, handler, ctx,
             )
+        } else if protocols::aura_shell::ALLOWED_INTERFACES.contains(&interface) {
+            // Silently drop events for internally-bound aura_shell objects.
+            // We only use these interfaces for sending requests to the host
+            // (e.g. set_application_id); we never subscribe to events.
+            Ok(None)
         } else {
             Ok(None)
         }

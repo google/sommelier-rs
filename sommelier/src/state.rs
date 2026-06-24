@@ -355,6 +355,9 @@ pub struct Context {
     pub xdg_decoration: bool,
     /// Host-side zaura_shell object ID (bound internally, not exposed to guest).
     pub host_zaura_shell_id: Option<u32>,
+    /// Bound version of zaura_shell (capped at 38 in registry). Used to guard
+    /// opcodes that require specific protocol versions.
+    pub host_zaura_shell_version: u32,
     /// VM identifier for ChromeOS guest_os app ID formatting (from SOMMELIER_VM_IDENTIFIER).
     pub vm_identifier: String,
     /// Maps host wl_surface ID → host zaura_surface ID for app ID passthrough.
@@ -425,6 +428,7 @@ impl Context {
             gpu_accel,
             xdg_decoration,
             host_zaura_shell_id: None,
+            host_zaura_shell_version: 0,
             vm_identifier: std::env::var("SOMMELIER_VM_IDENTIFIER")
                 .unwrap_or_else(|_| "termina".to_string()),
             wl_surface_to_zaura_surface: HashMap::new(),
