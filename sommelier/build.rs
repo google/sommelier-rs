@@ -55,6 +55,7 @@ fn main() {
             "keyboard_extension_unstable_v1",
             "../third_party/protocols/keyboard-extension-unstable-v1.xml",
         ),
+        ("aura_shell", "../third_party/protocols/aura-shell.xml"),
     ];
 
     for (name, path_str) in &protocols {

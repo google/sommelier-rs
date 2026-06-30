@@ -153,6 +153,31 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             log::debug!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
 
             return Action::Drop;
+        } else if interface == "zaura_shell" {
+            // Bind zaura_shell internally for ChromeOS shelf integration.
+            // We use this to create zaura_surface objects and set application
+            // IDs so the shelf can match windows to .desktop entries.
+            // Not exposed to the guest; capped at v38 (need v5 for
+            // set_application_id, v38 for release destructor).
+            let host_id = ctx.shadow_table.allocate_host_id();
+            let bound_version = std::cmp::min(version, 38);
+            ctx.host_zaura_shell_id = Some(host_id);
+            ctx.host_zaura_shell_version = bound_version;
+            ctx.shadow_table
+                .track_host_interface(host_id, "zaura_shell".to_string());
+
+            let registry_host_id = ctx.last_sender_id;
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(name);
+            builder.write_string(interface);
+            builder.write_u32(bound_version);
+            builder.write_u32(host_id);
+
+            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
+            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            log::debug!("Bound zaura_shell internally (host_id={})", host_id);
+
+            return Action::Drop;
         } else if interface == "wl_shm" {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_shm_id = Some(host_id);

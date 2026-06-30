@@ -194,6 +194,11 @@ impl Client {
         } else if protocols::keyboard_extension_unstable_v1::ALLOWED_INTERFACES.contains(&interface)
         {
             protocols::keyboard_extension_unstable_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::aura_shell::ALLOWED_INTERFACES.contains(&interface) {
+            // Silently drop events for internally-bound aura_shell objects.
+            // We only use these interfaces to send requests (set_application_id
+            // via zaura_surface), never to receive events.
+            Ok(None)
         } else {
             Ok(None)
         }
@@ -439,7 +444,11 @@ protocols::wayland::impl_sommelier_delegates!(SommelierHandler, {
 impl protocols::wayland::ProtocolHandler for SommelierHandler {}
 
 // XDG Shell Protocol
-protocols::xdg_shell::impl_sommelier_delegates!(SommelierHandler, {});
+protocols::xdg_shell::impl_sommelier_delegates!(SommelierHandler, {
+    xdg_wm_base: compositor,
+    xdg_surface: compositor,
+    xdg_toplevel: compositor
+});
 impl protocols::xdg_shell::ProtocolHandler for SommelierHandler {}
 
 // Linux DMABuf Protocol
