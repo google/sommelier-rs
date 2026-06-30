@@ -13,13 +13,13 @@ When referring to this project, please use "sommelier-rs" to avoid confusion wit
    For x86_64
 
    ```bash
-   wget -O sommelier-rs-v0.1.1 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.1.1/sommelier_rs_virtwl-v0.1.1-x86_64
+   wget -O sommelier-rs-v0.2.0 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.2.0/sommelier_rs_virtwl-v0.2.0-x86_64
    ```
 
    For arm64 / aarch64
 
    ```bash
-   wget -O sommelier-rs-v0.1.1 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.1.1/sommelier_rs_virtwl-v0.1.1-aarch64
+   wget -O sommelier-rs-v0.2.0 https://github.com/google/sommelier-rs/releases/download/virtwl-v0.2.0/sommelier_rs_virtwl-v0.2.0-aarch64
    ```
 
 2. (If you are running migrating from sommelier, e.g. in ChromeOS guests)
@@ -33,13 +33,13 @@ When referring to this project, please use "sommelier-rs" to avoid confusion wit
 3. Give sommelier-rs permission to run
 
    ```bash
-   chmod +x sommelier-rs-v0.1.1
+   chmod +x sommelier-rs-v0.2.0
    ```
 
 4. Run sommelier-rs
 
    ```bash
-   ./sommelier-rs-v0.1.1 --virtio-wl /dev/wl0 wayland-0
+   ./sommelier-rs-v0.2.0 --virtio-wl /dev/wl0 wayland-0
    ```
 
 5. Run your favourite Wayland app in a separate terminal, it should automatically find and use sommelier-rs to display its windows
