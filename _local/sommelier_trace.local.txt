@@ -1,0 +1,6 @@
+warning: unknown setting 'eval-cores'
+warning: unknown setting 'lazy-trees'
+   Compiling sommelier v0.1.1 (/home/kkimdev/workspaces/openstd/monorepo/_local/sommelier-rs/sommelier)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.70s
+     Running `target/debug/sommelier wayland-proxy-temp`
+[2026-06-11T22:38:02Z INFO  sommelier::proxy] Listening on /run/user/1000/wayland-proxy-temp
