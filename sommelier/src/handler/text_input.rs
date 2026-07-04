@@ -22,18 +22,10 @@ use crate::protocols::text_input_unstable_v3::zwp_text_input_manager_v3;
 use crate::protocols::text_input_unstable_v3::zwp_text_input_v3;
 use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
+use std::os::unix::io::RawFd;
 
-// Helpers that eliminate repetitive wire-format construction.
-// host→client messages go to the guest's virtual input device (e.g. synthetic keyboard events).
-// client→host messages go to the host compositor (e.g. activate, commit_state).
-fn queue_host_msg(ctx: &mut Context, sender_id: u32, opcode: u16, builder: MessageBuilder) {
-    ctx.host_to_client_queue
-        .push((builder.build_message(sender_id, opcode), Vec::new()));
-}
-
-fn queue_client_msg(ctx: &mut Context, sender_id: u32, opcode: u16, builder: MessageBuilder) {
-    ctx.client_to_host_queue
-        .push((builder.build_message(sender_id, opcode), Vec::new()));
+fn push_msg(queue: &mut Vec<(Vec<u8>, Vec<RawFd>)>, sender_id: u32, opcode: u16, builder: MessageBuilder) {
+    queue.push((builder.build_message(sender_id, opcode), Vec::new()));
 }
 
 pub struct TextInputManagerV1Handler;
@@ -65,12 +57,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             builder.write_string(text);
             builder.write_i32(0);
             builder.write_i32(text.len() as i32);
-            queue_host_msg(ctx, guest_id, 2, builder);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
             // v3 done (opcode 5): signals the guest that the preedit update is complete.
             let mut builder = MessageBuilder::new();
             builder.write_u32(commit_serial);
-            queue_host_msg(ctx, guest_id, 5, builder);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         }
         Action::Drop
     }
@@ -92,17 +84,17 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             builder.write_string("");
             builder.write_i32(0);
             builder.write_i32(0);
-            queue_host_msg(ctx, guest_id, 2, builder);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
             // v3 commit_string (opcode 3).
             let mut builder = MessageBuilder::new();
             builder.write_string(text);
-            queue_host_msg(ctx, guest_id, 3, builder);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
 
             // v3 done (opcode 5) with serial.
             let mut builder = MessageBuilder::new();
             builder.write_u32(commit_serial);
-            queue_host_msg(ctx, guest_id, 5, builder);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         }
         Action::Drop
     }
@@ -165,7 +157,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 builder.write_u32(time);
                 builder.write_u32(keycode);
                 builder.write_u32(state);
-                queue_host_msg(ctx, keyboard_id, 3, builder);
+                push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
             }
         }
         Action::Drop
@@ -246,12 +238,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             let mut builder = MessageBuilder::new();
             builder.write_u32(before_length);
             builder.write_u32(after_length);
-            queue_host_msg(ctx, guest_id, 4, builder);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
 
             // v3 done (opcode 5) to commit the delete.
             let mut builder = MessageBuilder::new();
             builder.write_u32(commit_serial);
-            queue_host_msg(ctx, guest_id, 5, builder);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         }
         Action::Drop
     }
@@ -289,28 +281,14 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     fn on_set_preedit_region(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
 
-        struct PreeditAction {
-            guest_id: u32,
-            commit_serial: u32,
-            before_length: u32,
-            after_length: u32,
-            preedit_text: String,
-        }
-
-        // Lookup by host_ext_id because this event arrives on the extended text input protocol.
-        let action = ctx
-            .text_inputs
-            .iter_mut()
-            .find(|(_, s)| s.host_ext_id == host_ext_id)
-            .and_then(|(&guest_id, state)| {
-                let commit_serial = state.commit_serial;
-                let (text, cursor, _anchor) = state.surrounding_text.as_ref()?;
+        if let Some((&guest_id, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_ext_id == host_ext_id) {
+            let commit_serial = state.commit_serial;
+            if let Some((text, cursor, _anchor)) = state.surrounding_text.as_ref() {
                 let cursor_i64 = *cursor as i64;
                 let index_i64 = index as i64;
                 let start_idx = cursor_i64 + index_i64;
                 let length_i64 = length as i64;
 
-                // Validate bounds and char boundaries for CJK safety.
                 if start_idx >= 0
                     && start_idx + length_i64 <= text.len() as i64
                     && text.is_char_boundary(start_idx as usize)
@@ -328,33 +306,28 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                         0
                     };
                     state.current_preedit = preedit_text.clone();
-                    Some(PreeditAction { guest_id, commit_serial, before_length, after_length, preedit_text })
+
+                    let mut builder = MessageBuilder::new();
+                    builder.write_u32(before_length);
+                    builder.write_u32(after_length);
+                    push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
+
+                    let mut builder = MessageBuilder::new();
+                    builder.write_string(&preedit_text);
+                    builder.write_i32(0);
+                    builder.write_i32(preedit_text.len() as i32);
+                    push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+
+                    let mut builder = MessageBuilder::new();
+                    builder.write_u32(commit_serial);
+                    push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
                 } else {
                     log::warn!(
                         "on_set_preedit_region: calculated range [{}, {}] is out of bounds or invalid for text of length {}",
                         start_idx, start_idx + length_i64, text.len()
                     );
-                    None
                 }
-            });
-
-        // Send three v1 messages: delete_surrounding_text to replace the region,
-        // preedit_string to display highlighted text, and done to commit.
-        if let Some(a) = action {
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(a.before_length);
-            builder.write_u32(a.after_length);
-            queue_host_msg(ctx, a.guest_id, 4, builder);
-
-            let mut builder = MessageBuilder::new();
-            builder.write_string(&a.preedit_text);
-            builder.write_i32(0);
-            builder.write_i32(a.preedit_text.len() as i32);
-            queue_host_msg(ctx, a.guest_id, 2, builder);
-
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(a.commit_serial);
-            queue_host_msg(ctx, a.guest_id, 5, builder);
+            }
         }
 
         Action::Drop
@@ -384,31 +357,21 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     ) -> Action {
         Action::Drop
     }
-    // Commits the cached preedit text to the guest as a v3 commit_string + done sequence.
-    // The preedit was cached by on_set_preedit_region; no surrounding_text needed here.
     fn on_confirm_preedit(&mut self, ctx: &mut Context, _selection_behavior: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
-        let confirm = ctx
-            .text_inputs
-            .iter_mut()
-            .find(|(_, s)| s.host_ext_id == host_ext_id)
-            .map(|(&guest_id, state)| {
-                let preedit_text = state.current_preedit.clone();
-                let commit_serial = state.commit_serial;
-                state.current_preedit.clear();
-                (guest_id, preedit_text, commit_serial)
-            });
+        if let Some((&guest_id, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_ext_id == host_ext_id) {
+            let preedit_text = state.current_preedit.clone();
+            let commit_serial = state.commit_serial;
+            state.current_preedit.clear();
 
-        if let Some((guest_id, preedit_text, commit_serial)) = confirm {
-            // Skip empty commits to avoid confusing the guest.
             if !preedit_text.is_empty() {
                 let mut builder = MessageBuilder::new();
                 builder.write_string(&preedit_text);
-                queue_host_msg(ctx, guest_id, 3, builder);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
 
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(commit_serial);
-                queue_host_msg(ctx, guest_id, 5, builder);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
             }
         }
         Action::Drop
@@ -424,14 +387,14 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
         if let Some(host_manager_id) = ctx.host_text_input_manager_v1_id {
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_v1_id);
-            queue_client_msg(ctx, host_manager_id, 0, builder);
+            push_msg(&mut ctx.client_to_host_queue, host_manager_id, 0, builder);
         }
 
         if let Some(host_ext_manager_id) = ctx.host_text_input_extension_v1_id {
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_ext_id);
             builder.write_u32(host_v1_id);
-            queue_client_msg(ctx, host_ext_manager_id, 0, builder);
+            push_msg(&mut ctx.client_to_host_queue, host_ext_manager_id, 0, builder);
         }
 
         ctx.shadow_table.map_id(id, host_v1_id);
@@ -460,7 +423,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
-                commit_serial: 0,
+                commit_serial: 1,
                 host_serial: 0,
                 host_activated: false,
             },
@@ -470,67 +433,40 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
     }
 }
 
-// Decouples host-side text-input activation from the v3 on_commit lifecycle.
-// Called from keyboard enter/leave after setting active_surface, so we never
-// send activate with a null surface even if the client commits before focus.
 pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
-    struct ActivationAction {
-        host_v1_id: u32,
-        host_seat: u32,
-        host_surface: u32,
-        target_activated: bool,
-    }
-
-    // Immutable get(): the borrow is dropped before the later get_mut().
-    let action = ctx.text_inputs.get(&guest_id).map(|state| {
+    if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
         let host_seat = ctx.shadow_table.get_host_id(state.guest_seat).unwrap_or(0);
         let host_surface = state
             .active_surface
             .and_then(|s| ctx.shadow_table.get_host_id(s))
             .unwrap_or(0);
         let target_activated = state.enabled && host_surface != 0;
-        ActivationAction {
-            host_v1_id: state.host_v1_id,
-            host_seat,
-            host_surface,
-            target_activated,
+
+        if target_activated == state.host_activated {
+            return;
         }
-    });
+        state.host_activated = target_activated;
 
-    if let Some(a) = action {
-        let prev_activated = ctx
-            .text_inputs
-            .get(&guest_id)
-            .map(|s| s.host_activated)
-            .unwrap_or(false);
-
-        if a.target_activated != prev_activated {
-            if a.target_activated {
-                log::info!(
-                    "update_host_activation: activating text input v1 (guest_id={}, host_v1_id={}, host_surface={})",
-                    guest_id,
-                    a.host_v1_id,
-                    a.host_surface,
-                );
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(a.host_seat);
-                builder.write_u32(a.host_surface);
-                queue_client_msg(ctx, a.host_v1_id, 0, builder);
-            } else {
-                log::info!(
-                    "update_host_activation: deactivating text input v1 (guest_id={}, host_v1_id={})",
-                    guest_id,
-                    a.host_v1_id
-                );
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(a.host_seat);
-                queue_client_msg(ctx, a.host_v1_id, 1, builder);
-            }
-
-            // Separate get_mut() call — immutable borrow from action is already dropped.
-            if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-                state.host_activated = a.target_activated;
-            }
+        if target_activated {
+            log::info!(
+                "update_host_activation: activating text input v1 (guest_id={}, host_v1_id={}, host_surface={})",
+                guest_id,
+                state.host_v1_id,
+                host_surface,
+            );
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(host_seat);
+            builder.write_u32(host_surface);
+            push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 0, builder);
+        } else {
+            log::info!(
+                "update_host_activation: deactivating text input v1 (guest_id={}, host_v1_id={})",
+                guest_id,
+                state.host_v1_id
+            );
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(host_seat);
+            push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 1, builder);
         }
     }
 }
@@ -602,75 +538,40 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         Action::Drop
     }
 
-    // Translates zwp_text_input_v3::commit into a batch of zwp_text_input_v1 messages.
-    // The serial is incremented before update_host_activation so activation uses it.
     fn on_commit(&mut self, ctx: &mut Context) -> Action {
         let guest_id = ctx.last_sender_id;
 
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-            // wrapping_add prevents panic on overflow; .max(1) avoids serial 0 (unset state).
             state.commit_serial = state.commit_serial.wrapping_add(1).max(1);
         }
 
-        // May send activate/deactivate to the host if enabled/surface changed.
         update_host_activation(ctx, guest_id);
 
-        // Extract all state values while holding the mutable borrow, then drop it
-        // so queue_client_msg can borrow ctx again.
-        struct CommitActions {
-            host_v1_id: u32,
-            host_ext_id: u32,
-            text_info: Option<(String, i32, i32)>,
-            content_type: Option<(u32, u32)>,
-            cursor_rect: Option<(i32, i32, i32, i32)>,
-            host_serial: u32,
-        }
-
-        let actions = ctx.text_inputs.get_mut(&guest_id).map(|state| {
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.enabled_changed = false;
-            CommitActions {
-                host_v1_id: state.host_v1_id,
-                host_ext_id: state.host_ext_id,
-                // Only send surrounding text if it changed (dirty flag).
-                text_info: if state.surrounding_text_dirty {
-                    state.surrounding_text_dirty = false;
-                    state.surrounding_text.clone()
-                } else {
-                    None
-                },
-                // content_hint/purpose are consumed once and reset after sending.
-                content_type: if state.content_hint != 0 || state.content_purpose != 0 {
-                    let hint = state.content_hint;
-                    let purpose = state.content_purpose;
-                    state.content_hint = 0;
-                    state.content_purpose = 0;
-                    Some((hint, purpose))
-                } else {
-                    None
-                },
-                cursor_rect: state.cursor_rect.take(),
-                host_serial: state.host_serial,
-            }
-        });
 
-        if let Some(a) = actions {
-            // set_surrounding_text (opcode 5) on v1.
-            if let Some((text, cursor, anchor)) = a.text_info {
-                let mut builder = MessageBuilder::new();
-                builder.write_string(&text);
-                builder.write_u32(cursor as u32);
-                builder.write_u32(anchor as u32);
-                queue_client_msg(ctx, a.host_v1_id, 5, builder);
+            if state.surrounding_text_dirty {
+                state.surrounding_text_dirty = false;
+                if let Some((text, cursor, anchor)) = &state.surrounding_text {
+                    let mut builder = MessageBuilder::new();
+                    builder.write_string(text);
+                    builder.write_u32(*cursor as u32);
+                    builder.write_u32(*anchor as u32);
+                    push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 5, builder);
+                }
             }
 
-            // set_content_type (opcode 6) on v1 + set_input_type (opcode 6) on extended.
-            if let Some((hint, purpose)) = a.content_type {
+            if state.content_hint != 0 || state.content_purpose != 0 {
+                let hint = state.content_hint;
+                let purpose = state.content_purpose;
+                state.content_hint = 0;
+                state.content_purpose = 0;
+
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(hint);
                 builder.write_u32(purpose);
-                queue_client_msg(ctx, a.host_v1_id, 6, builder);
+                push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 6, builder);
 
-                // Map zwp_text_input_v3 content purpose → zcr_extended_text_input_v1 input type.
                 let input_type = match purpose {
                     0 | 1 | 7 => 1,
                     2 | 3 => 2,
@@ -680,28 +581,27 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                     8 => 6,
                     _ => 1,
                 };
-
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(input_type);
                 builder.write_u32(0);
                 builder.write_u32(0);
                 builder.write_u32(0);
                 builder.write_u32(0);
-                queue_client_msg(ctx, a.host_ext_id, 6, builder);
+                push_msg(&mut ctx.client_to_host_queue, state.host_ext_id, 6, builder);
             }
 
-            if let Some((x, y, w, h)) = a.cursor_rect {
+            if let Some((x, y, w, h)) = state.cursor_rect.take() {
                 let mut builder = MessageBuilder::new();
                 builder.write_i32(x);
                 builder.write_i32(y);
                 builder.write_i32(w);
                 builder.write_i32(h);
-                queue_client_msg(ctx, a.host_v1_id, 7, builder);
+                push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 7, builder);
             }
 
             let mut builder = MessageBuilder::new();
-            builder.write_u32(a.host_serial);
-            queue_client_msg(ctx, a.host_v1_id, 9, builder);
+            builder.write_u32(state.host_serial);
+            push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 9, builder);
         }
 
         Action::Drop
