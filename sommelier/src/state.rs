@@ -311,15 +311,15 @@ pub struct TextInputState {
     pub enabled: bool,
     pub enabled_changed: bool,
     pub surrounding_text: Option<(String, i32, i32)>,
-    pub surrounding_text_dirty: bool, // set by on_set_surrounding_text, consumed by commit
+    pub surrounding_text_dirty: bool,
     pub content_hint: u32,
     pub content_purpose: u32,
     pub cursor_rect: Option<(i32, i32, i32, i32)>,
     pub text_change_cause: u32,
-    pub current_preedit: String, // cached between set_preedit_region and confirm_preedit
-    pub commit_serial: u32,      // incremented on each commit, wrapped to 0→1
-    pub host_serial: u32,        // last serial from host (preedit/commit/keysym/language/direction)
-    pub host_activated: bool,    // whether we sent activate to the host
+    pub current_preedit: String,
+    pub commit_serial: u32,
+    pub host_serial: u32,
+    pub host_activated: bool,
 }
 
 pub struct Context {
@@ -451,15 +451,12 @@ impl Context {
     /// ensuring tests always run against a known accelerator configuration
     /// regardless of the environment.
     #[cfg(test)]
-    pub fn new_for_test(
-        gpu_accel: bool,
-        xdg_decoration: bool,
-        accelerators: Vec<crate::accelerator::Accelerator>,
-    ) -> Self {
+    pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
         let mut ctx = Self::new(gpu_accel, xdg_decoration);
         ctx.accelerators = accelerators;
         ctx
     }
+
 }
 
 #[cfg(test)]
@@ -487,11 +484,7 @@ mod tests {
         // The second allocation happens after the counter has wrapped to 2.
         // It must also return a valid ID and must not collide with id1.
         let id2 = table.allocate_host_id();
-        assert!(
-            id2 >= 2,
-            "post-wrap allocation must skip reserved IDs, got {}",
-            id2
-        );
+        assert!(id2 >= 2, "post-wrap allocation must skip reserved IDs, got {}", id2);
         assert_ne!(id1, id2, "successive allocations must return distinct IDs");
     }
 
@@ -509,11 +502,7 @@ mod tests {
         let mut table = ShadowTable::new();
         table.next_host_id = 0;
         let id = table.allocate_host_id();
-        assert!(
-            id >= 2,
-            "post-zero allocation must skip reserved IDs, got {}",
-            id
-        );
+        assert!(id >= 2, "post-zero allocation must skip reserved IDs, got {}", id);
     }
 
     /// Regression: allocate_host_id must not re-issue IDs already registered in
@@ -534,11 +523,7 @@ mod tests {
 
         // The allocator must skip 2 and 3 (in host_interfaces) and return 4.
         let id = table.allocate_host_id();
-        assert_eq!(
-            id, 4,
-            "allocator must skip IDs registered in host_interfaces, got {}",
-            id
-        );
+        assert_eq!(id, 4, "allocator must skip IDs registered in host_interfaces, got {}", id);
         assert!(
             !table.host_interfaces.contains_key(&id) || id == 4,
             "returned ID must not be in host_interfaces"

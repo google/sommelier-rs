@@ -77,15 +77,7 @@ impl MmapView {
         // retain it. The returned pointer owns the mapping until munmap.
         let ptr = unsafe {
             let borrowed = BorrowedFd::borrow_raw(fd);
-            mmap(
-                None,
-                nonzero_len,
-                ProtFlags::PROT_READ,
-                MapFlags::MAP_SHARED,
-                borrowed,
-                0,
-            )
-            .ok()?
+            mmap(None, nonzero_len, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, borrowed, 0).ok()?
         };
         Some(Self { ptr, len })
     }
@@ -107,11 +99,7 @@ impl Drop for MmapView {
         // catches any future copy-paste of this code into a context where
         // that invariant might not hold.
         let res = unsafe { nix::sys::mman::munmap(self.ptr, self.len) };
-        debug_assert!(
-            res.is_ok(),
-            "munmap on a valid mmap mapping must not fail: {:?}",
-            res
-        );
+        debug_assert!(res.is_ok(), "munmap on a valid mmap mapping must not fail: {:?}", res);
     }
 }
 
@@ -172,14 +160,8 @@ impl KeyboardHandler {
     }
 
     /// Check if the pressed key matches any configured host accelerators.
-    fn is_host_accelerator(
-        &self,
-        accelerators: &[crate::accelerator::Accelerator],
-        key: u32,
-    ) -> bool {
-        let Some(state) = &self.state else {
-            return false;
-        };
+    fn is_host_accelerator(&self, accelerators: &[crate::accelerator::Accelerator], key: u32) -> bool {
+        let Some(state) = &self.state else { return false; };
 
         let xkb_keycode = xkb::Keycode::new(key + 8);
         // Use key_get_one_sym so that the full XKB state (including active shift
@@ -200,12 +182,7 @@ impl KeyboardHandler {
         let lower_sym = crate::accelerator::keysym_to_lower(sym.raw());
         for acc in accelerators {
             if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
-                log::trace!(
-                    "Accelerator match: key={}, modifiers={:#x}, sym={:#x}",
-                    key,
-                    self.modifiers,
-                    lower_sym
-                );
+                log::trace!("Accelerator match: key={}, modifiers={:#x}, sym={:#x}", key, self.modifiers, lower_sym);
                 return true;
             }
         }
@@ -234,17 +211,12 @@ impl KeyboardHandler {
     /// those keys. This mirrors the behavior of the C sommelier reference.
     pub(crate) fn ensure_extended_keyboard_bound(ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
-            if !ctx
-                .keyboard_to_extended_keyboard
-                .contains_key(&host_keyboard_id)
-            {
+            if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
                 let host_extended_id = HostId::from_allocated(ctx.shadow_table.allocate_host_id());
                 ctx.keyboard_to_extended_keyboard
                     .insert(host_keyboard_id, host_extended_id);
-                ctx.shadow_table.track_host_interface(
-                    host_extended_id.0,
-                    "zcr_extended_keyboard_v1".to_string(),
-                );
+                ctx.shadow_table
+                    .track_host_interface(host_extended_id.0, "zcr_extended_keyboard_v1".to_string());
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
                 // payload = [new_id(4)][keyboard(4)] = 8 bytes.
@@ -277,8 +249,7 @@ impl KeyboardHandler {
             // Protocol not available on this compositor; silently skip.
             return;
         }
-        let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id)
-        else {
+        let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) else {
             log::warn!(
                 "ack_key: no extended keyboard bound for host_keyboard_id={}; \
                  key event arrived before on_enter? serial={}, handled={}",
@@ -404,11 +375,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     ) -> Action {
         // on_enter is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
-        let guest_keyboard_id = ctx
-            .shadow_table
-            .guest_id_of(host_keyboard_id)
-            .map(|g| g.0)
-            .unwrap_or(0);
+        let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
         // Lazily bind the extended keyboard object on first enter.
@@ -451,11 +418,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     fn on_leave(&mut self, ctx: &mut Context, _serial: u32, surface: u32) -> Action {
         // on_leave is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
-        let guest_keyboard_id = ctx
-            .shadow_table
-            .guest_id_of(host_keyboard_id)
-            .map(|g| g.0)
-            .unwrap_or(0);
+        let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
         // Same deferred pattern as on_enter.
@@ -480,7 +443,6 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             }
         }
 
-        // Same deferred pattern as on_enter.
         for id in text_inputs_to_update {
             crate::handler::text_input::update_host_activation(ctx, id);
         }
@@ -588,9 +550,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             log::debug!(
                 "on_modifiers: XKB state not yet initialised (keymap not received); \
                  modifier event ignored (depressed={:#x}, latched={:#x}, locked={:#x})",
-                mods_depressed,
-                mods_latched,
-                mods_locked
+                mods_depressed, mods_latched, mods_locked
             );
         }
         Action::Forward
@@ -606,10 +566,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     fn on_release(&mut self, ctx: &mut Context) -> Action {
         // Translate guest ID → host ID. Returns None for unknown keyboards
         // (e.g. keyboards that never received an on_enter event).
-        let Some(host_keyboard_id) = ctx
-            .shadow_table
-            .host_id_of(GuestId::from_request_sender(ctx))
-        else {
+        let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId::from_request_sender(ctx)) else {
             return Action::Forward;
         };
         // Clear per-keyboard state: dropped-key set and modifier bitmask.
@@ -623,8 +580,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         //   bits and could produce wrong NOT_HANDLED/HANDLED decisions.
         self.dropped_keys.clear();
         self.modifiers = 0;
-        if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id)
-        {
+        if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
             // zcr_extended_keyboard_v1.destroy — no payload (8-byte header only).
             let msg = crate::wire::MessageBuilder::new()
                 .build_message(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_DESTROY);
@@ -763,8 +719,7 @@ mod tests {
         // host_keyboard_extension_id must be Some to enable the protocol path.
         // Use non-reserved IDs (not 0 or 1, which are null/wl_display).
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard
-            .insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
 
         // Ctrl+A should be dropped (host accelerator)
@@ -801,8 +756,7 @@ mod tests {
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard
-            .insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
 
         // Ctrl+B is NOT in accelerators → forward to guest
@@ -837,8 +791,7 @@ mod tests {
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard
-            .insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
 
         // Press → Drop
@@ -887,7 +840,8 @@ mod tests {
         use std::ffi::CString;
 
         let name = CString::new("test-keymap-norw").unwrap();
-        let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
+        let fd = memfd_create(name.as_c_str(), MFdFlags::empty())
+            .expect("memfd_create failed");
         nix::unistd::write(&fd, keymap_bytes).expect("write failed");
         // Write the NUL terminator that on_keymap expects (wl_keyboard.keymap.size
         // always includes it). Without this, the mmap covers one byte beyond what
@@ -932,8 +886,7 @@ mod tests {
 
         // Map entry must be removed so re-binding is possible.
         assert!(
-            !ctx.keyboard_to_extended_keyboard
-                .contains_key(&HostId(host_keyboard_id)),
+            !ctx.keyboard_to_extended_keyboard.contains_key(&HostId(host_keyboard_id)),
             "extended keyboard map must be cleared after release"
         );
 
@@ -943,10 +896,7 @@ mod tests {
         // Message: [sender_id(4)] [size_opcode(4)]  — opcode 0, len 8.
         let sender = u32::from_ne_bytes(msg[0..4].try_into().unwrap());
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
-        assert_eq!(
-            sender, host_extended_id,
-            "destroy must target host_extended_id"
-        );
+        assert_eq!(sender, host_extended_id, "destroy must target host_extended_id");
         assert_eq!(word2 >> 16, 8, "message length must be 8");
         assert_eq!(word2 & 0xFFFF, 0, "opcode must be 0 (destroy)");
     }
@@ -972,7 +922,8 @@ mod tests {
     #[test]
     fn is_host_accelerator_returns_false_without_xkb_state() {
         let handler = KeyboardHandler::new(); // no keymap loaded
-        let accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        let accelerators =
+            crate::accelerator::parse_accelerators("<Control>a").unwrap();
         // Must degrade gracefully, not panic.
         assert!(
             !handler.is_host_accelerator(&accelerators, 30),
@@ -991,15 +942,8 @@ mod tests {
         // A zero-size keymap must be rejected gracefully (mmap(len=0) is UB).
         // fd=0 (stdin) won't be mmap'd because the size check fires first.
         let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, 0, 0 /* size=0 */);
-        assert_eq!(
-            action,
-            Action::Forward,
-            "zero-size keymap must forward, not panic"
-        );
-        assert!(
-            handler.keymap.is_none(),
-            "keymap must not be set after zero-size event"
-        );
+        assert_eq!(action, Action::Forward, "zero-size keymap must forward, not panic");
+        assert!(handler.keymap.is_none(), "keymap must not be set after zero-size event");
     }
 
     #[test]
@@ -1031,21 +975,10 @@ mod tests {
         nix::unistd::write(&fd, bad_bytes).expect("write failed");
 
         use std::os::unix::io::AsRawFd;
-        let action = handler.on_keymap(
-            &mut ctx,
-            1, /* XKB_V1 */
-            fd.as_raw_fd(),
-            bad_bytes.len() as u32,
-        );
+        let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, fd.as_raw_fd(), bad_bytes.len() as u32);
         assert_eq!(action, Action::Forward, "invalid UTF-8 must still forward");
-        assert!(
-            handler.keymap.is_none(),
-            "keymap must remain None on parse error"
-        );
-        assert!(
-            handler.state.is_none(),
-            "state must remain None on parse error"
-        );
+        assert!(handler.keymap.is_none(), "keymap must remain None on parse error");
+        assert!(handler.state.is_none(), "state must remain None on parse error");
     }
 
     #[test]
@@ -1063,25 +996,10 @@ mod tests {
         nix::unistd::write(&fd, garbage).expect("write failed");
 
         use std::os::unix::io::AsRawFd;
-        let action = handler.on_keymap(
-            &mut ctx,
-            1, /* XKB_V1 */
-            fd.as_raw_fd(),
-            garbage.len() as u32,
-        );
-        assert_eq!(
-            action,
-            Action::Forward,
-            "invalid XKB string must still forward"
-        );
-        assert!(
-            handler.keymap.is_none(),
-            "keymap must remain None on XKB compile error"
-        );
-        assert!(
-            handler.state.is_none(),
-            "state must remain None on XKB compile error"
-        );
+        let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, fd.as_raw_fd(), garbage.len() as u32);
+        assert_eq!(action, Action::Forward, "invalid XKB string must still forward");
+        assert!(handler.keymap.is_none(), "keymap must remain None on XKB compile error");
+        assert!(handler.state.is_none(), "state must remain None on XKB compile error");
     }
 
     #[test]
@@ -1091,7 +1009,7 @@ mod tests {
         // must not panic or silently send a garbage ack. No queue entry expected.
         let mut ctx = Context::new(false, false);
         ctx.host_keyboard_extension_id = Some(HostId(99)); // protocol bound
-                                                           // keyboard_to_extended_keyboard is empty (on_enter not yet received)
+        // keyboard_to_extended_keyboard is empty (on_enter not yet received)
 
         KeyboardHandler::send_ack_key(&mut ctx, HostId(10), 1, true);
 
@@ -1113,11 +1031,7 @@ mod tests {
         let (msg, _) = &ctx.client_to_host_queue[0];
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
         let opcode = word2 & 0xFFFF;
-        assert_eq!(
-            opcode, 0,
-            "get_extended_keyboard must use opcode 0, got {}",
-            opcode
-        );
+        assert_eq!(opcode, 0, "get_extended_keyboard must use opcode 0, got {}", opcode);
     }
 
     /// Structural regression: dropped_keys must be cleared when the keyboard is released.
@@ -1140,8 +1054,7 @@ mod tests {
             find_keycode(&keymap, xkb::keysyms::KEY_a).expect("KEY_a not found in keymap");
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard
-            .insert(HostId(10), HostId(50));
+        ctx.keyboard_to_extended_keyboard.insert(HostId(10), HostId(50));
 
         // Press Ctrl+A (host accelerator) with host keyboard ID 10.
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
@@ -1149,10 +1062,7 @@ mod tests {
         ctx.last_sender_id = 10; // host keyboard ID (on_key is host→client)
         let action = handler.on_key(&mut ctx, 1, 0, wl_key_a, WL_KEY_PRESSED);
         assert_eq!(action, Action::Drop);
-        assert!(
-            handler.dropped_keys.contains(&wl_key_a),
-            "key must be in dropped_keys after drop"
-        );
+        assert!(handler.dropped_keys.contains(&wl_key_a), "key must be in dropped_keys after drop");
 
         // Guest destroys the keyboard (client→host: last_sender_id is the guest ID).
         ctx.shadow_table.map_id(5, 10); // guest 5 ↔ host 10
@@ -1221,11 +1131,7 @@ mod tests {
             "ZCR_EXTENDED_KEYBOARD_DESTROY constant out of sync with generated protocol"
         );
         assert_eq!(
-            ExtKbReq::AckKey {
-                serial: 0,
-                handled: 0
-            }
-            .opcode(),
+            ExtKbReq::AckKey { serial: 0, handled: 0 }.opcode(),
             ZCR_EXTENDED_KEYBOARD_ACK_KEY,
             "ZCR_EXTENDED_KEYBOARD_ACK_KEY constant out of sync with generated protocol"
         );
@@ -1256,8 +1162,7 @@ mod tests {
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard
-            .insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
         let action = handler.on_key(&mut ctx, 1, 0, wl_key_a, WL_KEY_PRESSED);
         assert_eq!(action, Action::Drop);
@@ -1321,3 +1226,4 @@ mod tests {
         );
     }
 }
+
