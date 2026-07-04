@@ -659,7 +659,7 @@ mod tests {
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
-                commit_serial: 0,
+                commit_serial: 1,
                 host_serial: 0,
                 host_activated: false,
             },
@@ -935,12 +935,6 @@ mod tests {
     #[test]
     fn test_activation_state_machine() {
         let (mut ctx, _host_v1_id, guest_id) = setup_v1_ctx();
-
-        // 1. Initially enabled is true (from setup_v1_ctx), active_surface is None.
-        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-            state.enabled = true;
-            state.host_activated = false;
-        }
 
         // Guest calls commit before focus (active_surface is None).
         ctx.last_sender_id = guest_id;
