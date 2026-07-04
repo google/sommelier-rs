@@ -550,7 +550,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         mods_locked: u32,
         group: u32,
     ) -> Action {
-        log::info!(
+        log::trace!(
             ">>> wl_keyboard.on_modifiers: serial={}, depressed={:#x}, latched={:#x}, locked={:#x}, group={}",
             _serial, mods_depressed, mods_latched, mods_locked, group
         );

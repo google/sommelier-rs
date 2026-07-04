@@ -48,6 +48,14 @@ where
     }
 }
 
+fn store_host_serial(ctx: &mut Context, host_id: u32, serial: u32) {
+    if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+        if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
+            s.host_serial = serial;
+        }
+    }
+}
+
 pub struct TextInputManagerV1Handler;
 impl zwp_text_input_manager_v1::ZwpTextInputManagerV1Handler for TextInputManagerV1Handler {}
 
@@ -155,11 +163,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             ">>> on_keysym: host_id={}, guest_id={:?}, serial={}, sym=0x{:x} ({:?}), state={}",
             host_id, guest_id, serial, sym, sym_char, state
         );
-        if let Some(guest_id) = guest_id {
-            if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
-                s.host_serial = serial;
-            }
-        }
+        store_host_serial(ctx, host_id, serial);
 
         let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
         let found_keycode =
@@ -312,11 +316,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             ">>> on_language: host_id={}, guest_id={:?}, serial={}, language={:?}",
             host_id, guest_id, serial, _language
         );
-        if let Some(guest_id) = guest_id {
-            if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
-                s.host_serial = serial;
-            }
-        }
+        store_host_serial(ctx, host_id, serial);
         Action::Drop
     }
 
@@ -327,11 +327,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             ">>> on_text_direction: host_id={}, guest_id={:?}, serial={}, direction={}",
             host_id, guest_id, serial, _direction
         );
-        if let Some(guest_id) = guest_id {
-            if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
-                s.host_serial = serial;
-            }
-        }
+        store_host_serial(ctx, host_id, serial);
         Action::Drop
     }
 }
@@ -729,9 +725,15 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
     fn on_commit(&mut self, ctx: &mut Context) -> Action {
         let guest_id = ctx.last_sender_id;
-        log::trace!(">>> v3 on_commit: guest_id={}, enabled={}, host_v1_id={}", guest_id,
-            ctx.text_inputs.get(&guest_id).map(|s| s.enabled).unwrap_or(false),
-            ctx.text_inputs.get(&guest_id).map(|s| s.host_v1_id).unwrap_or(0));
+        let (enabled, host_v1_id) = ctx
+            .text_inputs
+            .get(&guest_id)
+            .map(|s| (s.enabled, s.host_v1_id))
+            .unwrap_or((false, 0));
+        log::trace!(
+            ">>> v3 on_commit: guest_id={}, enabled={}, host_v1_id={}",
+            guest_id, enabled, host_v1_id
+        );
 
         update_host_activation(ctx, guest_id);
 
