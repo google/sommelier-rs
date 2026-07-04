@@ -108,9 +108,6 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 s.host_serial = serial;
                 s.current_preedit.clear();
                 s.preedit_cleared_for_backspace = false;
-                for c in text.chars() {
-                    s.committed_char_sizes.push(c.len_utf8() as u8);
-                }
             });
 
             log::info!(
@@ -592,7 +589,6 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
-                committed_char_sizes: Vec::new(),
                 preedit_cleared_for_backspace: false,
                 done_serial: 1,
                 host_serial: 0,
@@ -679,7 +675,6 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.surrounding_text = Some((text.clone(), cursor, anchor));
             state.surrounding_text_dirty = true;
-            state.committed_char_sizes.clear();
         }
         Action::Drop
     }
@@ -847,7 +842,6 @@ mod tests {
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
-                committed_char_sizes: Vec::new(),
                 preedit_cleared_for_backspace: false,
                 done_serial: 1,
                 host_serial: 0,

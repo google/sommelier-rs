@@ -316,8 +316,6 @@ pub struct TextInputState {
     pub cursor_rect: Option<(i32, i32, i32, i32)>,
     pub text_change_cause: u32,
     pub current_preedit: String,
-    /// Stack of UTF-8 byte lengths for characters committed via commit_string.
-    pub committed_char_sizes: Vec<u8>,
     /// Set true when preedit_string("") is forwarded for non-commit clear (backspace).
     /// Used in confirm_preedit to distinguish backspace hold from initialization.
     pub preedit_cleared_for_backspace: bool,
