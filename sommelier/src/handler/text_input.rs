@@ -61,79 +61,81 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         commit: &String,
     ) -> Action {
         let host_id = ctx.last_sender_id;
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            let done_serial = with_state(ctx, guest_id, |s| {
-                s.host_serial = serial;
-                // Preedit going from non-empty to empty → cleared by backspace
-                if !s.current_preedit.is_empty() && text.is_empty() {
-                    s.preedit_cleared_for_backspace = true;
-                } else if !text.is_empty() {
-                    // New composition starting → end of backspace burst
-                    s.preedit_cleared_for_backspace = false;
-                }
-                s.current_preedit = text.clone();
-            });
+        let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) else {
+            return Action::Drop;
+        };
+        let done_serial = with_state(ctx, guest_id, |s| {
+            s.host_serial = serial;
+            // Preedit going from non-empty to empty → cleared by backspace
+            if !s.current_preedit.is_empty() && text.is_empty() {
+                s.preedit_cleared_for_backspace = true;
+            } else if !text.is_empty() {
+                // New composition starting → end of backspace burst
+                s.preedit_cleared_for_backspace = false;
+            }
+            s.current_preedit = text.clone();
+        });
 
-            log::info!(
-                ">>> on_preedit_string: serial={}, text={:?}, commit={:?}, guest_id={}, done_serial={}",
-                serial, text, commit, guest_id, done_serial
-            );
+        log::info!(
+            ">>> on_preedit_string: serial={}, text={:?}, commit={:?}, guest_id={}, done_serial={}",
+            serial, text, commit, guest_id, done_serial
+        );
 
-            // TODO: Korean IME drops intermediate syllables in continuous input
-            // (e.g., "가나다라마바사" → "가다마사"). The v1 `commit` parameter changes with
-            // every keystroke, but same-syllable composition and syllable transition are
-            // indistinguishable at the protocol level. v3 has no `commit` parameter or
-            // implicit commit mechanism, so these events are lost in translation.
+        // TODO: Korean IME drops intermediate syllables in continuous input
+        // (e.g., "가나다라마바사" → "가다마사"). The v1 `commit` parameter changes with
+        // every keystroke, but same-syllable composition and syllable transition are
+        // indistinguishable at the protocol level. v3 has no `commit` parameter or
+        // implicit commit mechanism, so these events are lost in translation.
 
-            // v3 preedit_string (opcode 2): cursor_end = text.len() selects entire preedit.
-            let mut builder = MessageBuilder::new();
-            builder.write_string(text);
-            builder.write_i32(0);
-            builder.write_i32(text.len() as i32);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+        // v3 preedit_string (opcode 2).
+        let mut builder = MessageBuilder::new();
+        builder.write_string(text);
+        builder.write_i32(0); // cursor_begin
+        builder.write_i32(text.len() as i32); // cursor_end
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
-            // v3 done (opcode 5): signals the guest that the preedit update is complete.
-            log::info!("  -> sending v3 preedit_string({:?}) + done({})", text, done_serial);
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(done_serial);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-        }
+        // v3 done (opcode 5): signals the guest that the preedit update is complete.
+        log::info!("  -> sending v3 preedit_string({:?}) + done({})", text, done_serial);
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
 
     fn on_commit_string(&mut self, ctx: &mut Context, serial: u32, text: &String) -> Action {
         let host_id = ctx.last_sender_id;
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            let done_serial = with_state(ctx, guest_id, |s| {
-                s.host_serial = serial;
-                s.current_preedit.clear();
-                s.preedit_cleared_for_backspace = false;
-            });
+        let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) else {
+            return Action::Drop;
+        };
+        let done_serial = with_state(ctx, guest_id, |s| {
+            s.host_serial = serial;
+            s.current_preedit.clear();
+            s.preedit_cleared_for_backspace = false;
+        });
 
-            log::info!(
-                ">>> on_commit_string: serial={}, text={:?}, guest_id={}, done_serial={}",
-                serial, text, guest_id, done_serial
-            );
-            log::info!("  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})", text, done_serial);
+        log::info!(
+            ">>> on_commit_string: serial={}, text={:?}, guest_id={}, done_serial={}",
+            serial, text, guest_id, done_serial
+        );
+        log::info!("  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})", text, done_serial);
 
-            // Explicitly clear preedit before commit (v3 preedit_string "").
-            // Without this, the guest may keep stale underline after commit.
-            let mut builder = MessageBuilder::new();
-            builder.write_string("");
-            builder.write_i32(0);
-            builder.write_i32(0);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+        // Explicitly clear preedit before commit — without this the guest
+        // may keep a stale underline after committing the final text.
+        let mut builder = MessageBuilder::new();
+        builder.write_string("");
+        builder.write_i32(0); // cursor_begin
+        builder.write_i32(0); // cursor_end
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
-            // v3 commit_string (opcode 3).
-            let mut builder = MessageBuilder::new();
-            builder.write_string(text);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
+        // v3 commit_string (opcode 3).
+        let mut builder = MessageBuilder::new();
+        builder.write_string(text);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
 
-            // v3 done (opcode 5) with serial.
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(done_serial);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-        }
+        // v3 done (opcode 5).
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
 
@@ -188,11 +190,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                     "  -> forwarding wl_keyboard.key: keyboard_id={}, serial={}, time={}, keycode={}, state={}",
                     keyboard_id, serial, time, keycode, state
                 );
+                // Send wl_keyboard::key (opcode 3).
                 let mut builder = MessageBuilder::new();
-                builder.write_u32(serial);
-                builder.write_u32(time);
-                builder.write_u32(keycode);
-                builder.write_u32(state);
+                builder.write_u32(serial); // serial
+                builder.write_u32(time);   // time
+                builder.write_u32(keycode); // key
+                builder.write_u32(state);  // state (0: released, 1: pressed)
                 push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
             } else {
                 log::warn!("  -> no wl_keyboard found to forward keysym to");
@@ -217,7 +220,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
     fn on_leave(&mut self, ctx: &mut Context) -> Action {
         let host_v1_id = ctx.last_sender_id;
-        log::info!(">>> on_leave");
+        log::info!(">>> on_leave: host_v1_id={}", host_v1_id);
         if let Some((_, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_v1_id == host_v1_id) {
             state.preedit_cleared_for_backspace = false;
         }
@@ -263,44 +266,40 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
     fn on_delete_surrounding_text(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_id = ctx.last_sender_id;
-        let guest_id = ctx.shadow_table.get_guest_id(host_id);
+        let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) else {
+            return Action::Drop;
+        };
         log::info!(
             ">>> on_delete_surrounding_text: host_id={}, guest_id={:?}, index={}, length={}",
             host_id, guest_id, index, length
         );
-        if let Some(guest_id) = guest_id {
-            let done_serial = ctx.text_inputs.get_mut(&guest_id).map_or(0, |s| {
-                let serial = s.done_serial;
-                s.done_serial = s.done_serial.wrapping_add(1).max(1);
-                serial
-            });
+        let done_serial = with_state(ctx, guest_id, |_| {});
 
-            // Convert v1's (index, length) to v3's (before_length, after_length).
-            // v1: delete `length` bytes starting at cursor + index.
-            // v3: delete `before_length` bytes before cursor, `after_length` after cursor.
-            // use i64 to avoid i32::MIN overflow when negating.
-            let (before_length, after_length) = {
-                let start = index as i64;
-                let end = start + length as i64;
-                let before = if start < 0 { (-start).min(length as i64) as u32 } else { 0 };
-                let after = if end > 0 { end as u32 } else { 0 };
-                (before, after)
-            };
+        // Convert v1's (index, length) to v3's (before_length, after_length).
+        // v1: delete `length` bytes starting at cursor + index.
+        // v3: delete `before_length` bytes before cursor, `after_length` after cursor.
+        // use i64 to avoid i32::MIN overflow when negating.
+        let (before_length, after_length) = {
+            let start = index as i64;
+            let end = start + length as i64;
+            let before = if start < 0 { (-start).min(length as i64) as u32 } else { 0 };
+            let after = if end > 0 { end as u32 } else { 0 };
+            (before, after)
+        };
 
-            log::info!(
-                "  -> sending v3 delete_surrounding_text(before={}, after={}) + done({})",
-                before_length, after_length, done_serial
-            );
+        log::info!(
+            "  -> sending v3 delete_surrounding_text(before={}, after={}) + done({})",
+            before_length, after_length, done_serial
+        );
 
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(before_length);
-            builder.write_u32(after_length);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(before_length);
+        builder.write_u32(after_length);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
 
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(done_serial);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-        }
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
 
@@ -349,62 +348,68 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             host_ext_id, index, length
         );
 
-        if let Some((&guest_id, state)) = ctx
+        let Some((&guest_id, state)) = ctx
             .text_inputs
             .iter_mut()
-            .find(|(_, s)| s.host_ext_id == host_ext_id)
-        {
+            .find(|(_, s)| s.host_ext_id == host_ext_id) else {
+            return Action::Drop;
+        };
+
+        if let Some((text, cursor, _anchor)) = state.surrounding_text.as_ref() {
             let done_serial = {
                 let serial = state.done_serial;
                 state.done_serial = state.done_serial.wrapping_add(1).max(1);
                 serial
             };
-            if let Some((text, cursor, _anchor)) = state.surrounding_text.as_ref() {
-                let cursor_i64 = *cursor as i64;
-                let index_i64 = index as i64;
-                let start_idx = cursor_i64 + index_i64;
-                let length_i64 = length as i64;
+            let cursor_i64 = *cursor as i64;
+            let index_i64 = index as i64;
+            let start_idx = cursor_i64 + index_i64;
+            let length_i64 = length as i64;
 
-                if start_idx >= 0
-                    && start_idx + length_i64 <= text.len() as i64
-                    && text.is_char_boundary(start_idx as usize)
-                    && text.is_char_boundary((start_idx + length_i64) as usize)
-                {
-                    let preedit_text =
-                        text[start_idx as usize..(start_idx + length_i64) as usize].to_string();
-                    let before_length = if start_idx < cursor_i64 {
-                        (cursor_i64 - start_idx) as u32
-                    } else {
-                        0
-                    };
-                    let after_length = if start_idx + length_i64 > cursor_i64 {
-                        (start_idx + length_i64 - cursor_i64) as u32
-                    } else {
-                        0
-                    };
-                    state.current_preedit = preedit_text.clone();
-
-                    let mut builder = MessageBuilder::new();
-                    builder.write_u32(before_length);
-                    builder.write_u32(after_length);
-                    push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
-
-                    let mut builder = MessageBuilder::new();
-                    builder.write_string(&preedit_text);
-                    builder.write_i32(0);
-                    builder.write_i32(preedit_text.len() as i32);
-                    push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
-
-                    let mut builder = MessageBuilder::new();
-                    builder.write_u32(done_serial);
-                    push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
+            if start_idx >= 0
+                && start_idx + length_i64 <= text.len() as i64
+                && text.is_char_boundary(start_idx as usize)
+                && text.is_char_boundary((start_idx + length_i64) as usize)
+            {
+                let preedit_text =
+                    text[start_idx as usize..(start_idx + length_i64) as usize].to_string();
+                let before_length = if start_idx < cursor_i64 {
+                    (cursor_i64 - start_idx) as u32
                 } else {
-                    log::warn!(
-                        "on_set_preedit_region: calculated range [{}, {}] is out of bounds or invalid for text of length {}",
-                        start_idx, start_idx + length_i64, text.len()
-                    );
-                }
+                    0
+                };
+                let after_length = if start_idx + length_i64 > cursor_i64 {
+                    (start_idx + length_i64 - cursor_i64) as u32
+                } else {
+                    0
+                };
+                state.current_preedit = preedit_text.clone();
+
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(before_length);
+                builder.write_u32(after_length);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
+
+                let mut builder = MessageBuilder::new();
+                builder.write_string(&preedit_text);
+                builder.write_i32(0);
+                builder.write_i32(preedit_text.len() as i32);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(done_serial);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
+            } else {
+                log::warn!(
+                    "on_set_preedit_region: calculated range [{}, {}] is out of bounds or invalid for text of length {}",
+                    start_idx, start_idx + length_i64, text.len()
+                );
             }
+        } else {
+            log::warn!(
+                "on_set_preedit_region: no surrounding text available for host_ext_id={}",
+                host_ext_id
+            );
         }
 
         Action::Drop
@@ -456,82 +461,75 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             ">>> on_confirm_preedit: host_ext_id={}, selection_behavior={}",
             host_ext_id, _selection_behavior
         );
-        if let Some((&guest_id, state)) = ctx
+        let Some((&guest_id, state)) = ctx
             .text_inputs
             .iter_mut()
-            .find(|(_, s)| s.host_ext_id == host_ext_id)
-        {
-            let preedit_text = state.current_preedit.clone();
+            .find(|(_, s)| s.host_ext_id == host_ext_id) else {
+            return Action::Drop;
+        };
+        let preedit_text = state.current_preedit.clone();
+        log::info!(
+            "  -> committing cached preedit={:?}, guest_id={}",
+            preedit_text, guest_id
+        );
+        let done_serial = {
+            let serial = state.done_serial;
+            state.done_serial = state.done_serial.wrapping_add(1).max(1);
+            serial
+        };
+        state.current_preedit.clear();
+
+        if !preedit_text.is_empty() {
             log::info!(
-                "  -> committing cached preedit={:?}, guest_id={}",
-                preedit_text, guest_id
+                "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
+                preedit_text, done_serial
             );
-            let done_serial = {
-                let serial = state.done_serial;
-                state.done_serial = state.done_serial.wrapping_add(1).max(1);
-                serial
-            };
-            state.current_preedit.clear();
+            let mut builder = MessageBuilder::new();
+            builder.write_string("");
+            builder.write_i32(0);
+            builder.write_i32(0);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
-            if !preedit_text.is_empty() {
+            let mut builder = MessageBuilder::new();
+            builder.write_string(&preedit_text);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
+        } else if state.preedit_cleared_for_backspace {
+            // Flag is sticky — stays true for entire backspace burst.
+            // Cleared by: new non-empty preedit, on_commit_string, on_enter, on_leave, on_enable, on_disable.
+            let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
+            if let Some(&keyboard_id) = keyboards.first() {
+                const KEY_BACKSPACE: u32 = 14;
                 log::info!(
-                    "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
-                    preedit_text, done_serial
+                    "  -> empty preedit after backspace clear, synthesizing wl_keyboard.key({}) press+release, done({})",
+                    KEY_BACKSPACE, done_serial
                 );
-                let mut builder = MessageBuilder::new();
-                builder.write_string("");
-                builder.write_i32(0);
-                builder.write_i32(0);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
                 let mut builder = MessageBuilder::new();
-                builder.write_string(&preedit_text);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
+                builder.write_u32(0);
+                builder.write_u32(0);
+                builder.write_u32(KEY_BACKSPACE);
+                builder.write_u32(1);
+                push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
 
                 let mut builder = MessageBuilder::new();
-                builder.write_u32(done_serial);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-            } else if state.preedit_cleared_for_backspace {
-                // Flag is sticky — stays true for entire backspace burst.
-                // Cleared by: new non-empty preedit, on_enter, on_leave, on_enable, on_disable.
-                let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
-                if let Some(&keyboard_id) = keyboards.first() {
-                    const KEY_BACKSPACE: u32 = 14;
-                    log::info!(
-                        "  -> empty preedit after backspace clear, synthesizing wl_keyboard.key({}) press+release, done({})",
-                        KEY_BACKSPACE, done_serial
-                    );
-
-                    let mut builder = MessageBuilder::new();
-                    builder.write_u32(0);
-                    builder.write_u32(0);
-                    builder.write_u32(KEY_BACKSPACE);
-                    builder.write_u32(1);
-                    push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
-
-                    let mut builder = MessageBuilder::new();
-                    builder.write_u32(0);
-                    builder.write_u32(0);
-                    builder.write_u32(KEY_BACKSPACE);
-                    builder.write_u32(0);
-                    push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
-                } else {
-                    log::warn!("  -> no wl_keyboard found for backspace synthesis");
-                }
-
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(done_serial);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
+                builder.write_u32(0);
+                builder.write_u32(0);
+                builder.write_u32(KEY_BACKSPACE);
+                builder.write_u32(0);
+                push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
             } else {
-                log::info!(
-                    "  -> empty preedit (no backspace context), sending just done({})",
-                    done_serial
-                );
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(done_serial);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
+                log::warn!("  -> no wl_keyboard found for backspace synthesis");
             }
+        } else {
+            log::info!(
+                "  -> empty preedit (no backspace context), sending just done({})",
+                done_serial
+            );
         }
+
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
 }
@@ -731,73 +729,73 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
         update_host_activation(ctx, guest_id);
 
-        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-            if state.surrounding_text_dirty {
-                state.surrounding_text_dirty = false;
-                if let Some((text, cursor, anchor)) = &state.surrounding_text {
-                    log::info!(
-                        "  -> sending v1 set_surrounding_text({:?}, cursor={}, anchor={})",
-                        text, cursor, anchor
-                    );
-                    let mut builder = MessageBuilder::new();
-                    builder.write_string(text);
-                    builder.write_u32(*cursor as u32);
-                    builder.write_u32(*anchor as u32);
-                    push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 5, builder);
-                }
-            }
-
-            if state.content_hint != 0 || state.content_purpose != 0 {
-                let hint = state.content_hint;
-                let purpose = state.content_purpose;
-                state.content_hint = 0;
-                state.content_purpose = 0;
-
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(hint);
-                builder.write_u32(purpose);
-                push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 6, builder);
-
-                let input_type = match purpose {
-                    0 | 1 | 7 => 1,
-                    2 | 3 => 2,
-                    4 => 3,
-                    5 => 4,
-                    6 => 5,
-                    8 => 6,
-                    _ => 1,
-                };
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(input_type);
-                builder.write_u32(0);
-                builder.write_u32(0);
-                builder.write_u32(0);
-                builder.write_u32(0);
-                push_msg(&mut ctx.client_to_host_queue, state.host_ext_id, 6, builder);
-            }
-
-            if let Some((x, y, w, h)) = state.cursor_rect.take() {
+        let Some(state) = ctx.text_inputs.get_mut(&guest_id) else {
+            return Action::Drop;
+        };
+        if state.surrounding_text_dirty {
+            state.surrounding_text_dirty = false;
+            if let Some((text, cursor, anchor)) = &state.surrounding_text {
                 log::info!(
-                    "  -> sending v1 set_cursor_rectangle({}, {}, {}, {})",
-                    x, y, w, h
+                    "  -> sending v1 set_surrounding_text({:?}, cursor={}, anchor={})",
+                    text, cursor, anchor
                 );
                 let mut builder = MessageBuilder::new();
-                builder.write_i32(x);
-                builder.write_i32(y);
-                builder.write_i32(w);
-                builder.write_i32(h);
-                push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 7, builder);
+                builder.write_string(text);
+                builder.write_u32(*cursor as u32);
+                builder.write_u32(*anchor as u32);
+                push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 5, builder);
             }
-
-            log::info!(
-                "  -> sending v1 commit_state(serial={})",
-                state.host_serial
-            );
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(state.host_serial);
-            push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 9, builder);
         }
 
+        if state.content_hint != 0 || state.content_purpose != 0 {
+            let hint = state.content_hint;
+            let purpose = state.content_purpose;
+            state.content_hint = 0;
+            state.content_purpose = 0;
+
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(hint);
+            builder.write_u32(purpose);
+            push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 6, builder);
+
+            let input_type = match purpose {
+                0 | 1 | 7 => 1,
+                2 | 3 => 2,
+                4 => 3,
+                5 => 4,
+                6 => 5,
+                8 => 6,
+                _ => 1,
+            };
+            let mut builder = MessageBuilder::new();
+            builder.write_u32(input_type);
+            builder.write_u32(0);
+            builder.write_u32(0);
+            builder.write_u32(0);
+            builder.write_u32(0);
+            push_msg(&mut ctx.client_to_host_queue, state.host_ext_id, 6, builder);
+        }
+
+        if let Some((x, y, w, h)) = state.cursor_rect.take() {
+            log::info!(
+                "  -> sending v1 set_cursor_rectangle({}, {}, {}, {})",
+                x, y, w, h
+            );
+            let mut builder = MessageBuilder::new();
+            builder.write_i32(x);
+            builder.write_i32(y);
+            builder.write_i32(w);
+            builder.write_i32(h);
+            push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 7, builder);
+        }
+
+        log::info!(
+            "  -> sending v1 commit_state(serial={})",
+            state.host_serial
+        );
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(state.host_serial);
+        push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 9, builder);
         Action::Drop
     }
 }

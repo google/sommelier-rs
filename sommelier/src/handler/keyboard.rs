@@ -373,7 +373,6 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         surface: u32, // Host ID
         _keys: &[u8],
     ) -> Action {
-        // on_enter is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
@@ -385,34 +384,33 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             host_keyboard_id, guest_keyboard_id, surface, guest_surface_id
         );
 
+        if guest_surface_id == 0 {
+            return Action::Forward;
+        }
+        let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) else {
+            log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
+            return Action::Forward;
+        };
+        log::info!("  -> seat_id={}: setting active_surface={}", guest_seat_id, guest_surface_id);
+        ctx.active_surface_for_seat.insert(guest_seat_id, guest_surface_id);
+
         let mut text_inputs_to_update = Vec::new();
-        if guest_surface_id != 0 {
-            if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
-                log::info!("  -> seat_id={}: setting active_surface={}", guest_seat_id, guest_surface_id);
-                ctx.active_surface_for_seat
-                    .insert(guest_seat_id, guest_surface_id);
+        for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
+            if state.guest_seat == guest_seat_id {
+                log::info!(
+                    "  -> text_input {}: active_surface = {}",
+                    guest_text_input_id, guest_surface_id
+                );
+                state.active_surface = Some(guest_surface_id);
 
-                for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
-                    if state.guest_seat == guest_seat_id {
-                        log::info!(
-                            "  -> text_input {}: active_surface = {}",
-                            guest_text_input_id, guest_surface_id
-                        );
-                        state.active_surface = Some(guest_surface_id);
-
-                        let mut builder = MessageBuilder::new();
-                        builder.write_u32(guest_surface_id);
-                        let msg = builder.build_message(*guest_text_input_id, 0);
-                        ctx.host_to_client_queue.push((msg, Vec::new()));
-                        text_inputs_to_update.push(*guest_text_input_id);
-                    }
-                }
-            } else {
-                log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(guest_surface_id);
+                let msg = builder.build_message(*guest_text_input_id, 0);
+                ctx.host_to_client_queue.push((msg, Vec::new()));
+                text_inputs_to_update.push(*guest_text_input_id);
             }
         }
 
-        // Now safe to call update_host_activation (borrows ctx mutably).
         for id in text_inputs_to_update {
             crate::handler::text_input::update_host_activation(ctx, id);
         }
@@ -421,7 +419,6 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     }
 
     fn on_leave(&mut self, ctx: &mut Context, _serial: u32, surface: u32) -> Action {
-        // on_leave is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
@@ -431,29 +428,30 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             host_keyboard_id, guest_keyboard_id, surface, guest_surface_id
         );
 
+        if guest_surface_id == 0 {
+            return Action::Forward;
+        }
+        let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) else {
+            log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
+            return Action::Forward;
+        };
+        log::info!("  -> seat_id={}: removing active_surface", guest_seat_id);
+        ctx.active_surface_for_seat.remove(&guest_seat_id);
+
         let mut text_inputs_to_update = Vec::new();
-        if guest_surface_id != 0 {
-            if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
-                log::info!("  -> seat_id={}: removing active_surface", guest_seat_id);
-                ctx.active_surface_for_seat.remove(&guest_seat_id);
+        for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
+            if state.guest_seat == guest_seat_id {
+                log::info!(
+                    "  -> text_input {}: active_surface = None",
+                    guest_text_input_id
+                );
+                state.active_surface = None;
 
-                for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
-                    if state.guest_seat == guest_seat_id {
-                        log::info!(
-                            "  -> text_input {}: active_surface = None",
-                            guest_text_input_id
-                        );
-                        state.active_surface = None;
-
-                        let mut builder = MessageBuilder::new();
-                        builder.write_u32(guest_surface_id);
-                        let msg = builder.build_message(*guest_text_input_id, 1);
-                        ctx.host_to_client_queue.push((msg, Vec::new()));
-                        text_inputs_to_update.push(*guest_text_input_id);
-                    }
-                }
-            } else {
-                log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(guest_surface_id);
+                let msg = builder.build_message(*guest_text_input_id, 1);
+                ctx.host_to_client_queue.push((msg, Vec::new()));
+                text_inputs_to_update.push(*guest_text_input_id);
             }
         }
 
@@ -474,6 +472,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         key: u32,
         state: u32,
     ) -> Action {
+        // on_key is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         log::info!(
@@ -482,19 +481,33 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         );
 
         let mut action = Action::Forward;
-        let mut handled = true;
+        let mut handled = true; // Default: guest handles the key.
 
+        // WL_KEY_PRESSED = 1, WL_KEY_RELEASED = 0.
+        // `other` catches any future unknown state values (e.g. if Wayland adds
+        // a new key-repeat state) without silently falling through to a wrong arm.
+        // In Rust, integer match arms are unordered — each arm matches its exact
+        // pattern and `other` fires only for values not matched above.
         match state {
             WL_KEY_PRESSED => {
+                // Key pressed: check if this is a host accelerator.
                 if self.is_host_accelerator(&ctx.accelerators, key) {
                     log::info!("  -> accelerator key, dropping");
                     action = Action::Drop;
                     handled = false;
                     self.dropped_keys.insert(key);
                 }
+                // Send ack_key only for press events, matching the C sommelier
+                // reference implementation. Exo places only press events into
+                // pending_key_acks_ and never expects an ack for a release;
+                // a release ack would target a non-existent serial and be
+                // silently ignored — but we avoid sending it for clarity and
+                // to match the C reference exactly.
                 Self::send_ack_key(ctx, host_keyboard_id, serial, handled);
             }
             WL_KEY_RELEASED => {
+                // Key released: if we dropped the press, drop the release too
+                // to avoid stuck-key state in the guest.
                 if self.dropped_keys.remove(&key) {
                     action = Action::Drop;
                 }
