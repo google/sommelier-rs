@@ -139,49 +139,27 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             }
         }
 
-        let sym_char = std::char::from_u32(sym).map(|c| c.to_string()).unwrap_or_default();
-        log::info!(
-            ">>> on_keysym: serial={}, sym=0x{:x} ({:?}), state={}",
-            serial, sym, sym_char, state
-        );
-
-        // Cache XKB context/keymap per thread to avoid recompiling on each key repeat.
-        thread_local! {
-            static XKB_CACHE: std::cell::RefCell<Option<(xkbcommon::xkb::Context, xkbcommon::xkb::Keymap)>> =
-                const { std::cell::RefCell::new(None) };
-        }
-
-        let found_keycode = XKB_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if cache.is_none() {
-                let xkb_ctx = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
-                if let Some(km) = xkbcommon::xkb::Keymap::new_from_names(
-                    &xkb_ctx,
-                    "",
-                    "",
-                    "",
-                    "",
-                    None,
-                    xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
-                ) {
-                    *cache = Some((xkb_ctx, km));
-                }
-            }
-            // Entire lookup stays inside `with()` so the RefCell borrow is dropped
-            // before returning — no raw pointer escape across the thread_local boundary.
-            let mut found = None;
-            if let Some((_, keymap)) = cache.as_ref() {
+        let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
+        let found_keycode =
+            xkbcommon::xkb::Keymap::new_from_names(
+                &context,
+                "",
+                "",
+                "",
+                "",
+                None,
+                xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+            )
+            .and_then(|keymap| {
                 for keycode_raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
                     let keycode = keycode_raw.into();
                     let syms = keymap.key_get_syms_by_level(keycode, 0, 0);
                     if syms.iter().any(|s| s.raw() == sym) {
-                        found = Some(keycode_raw - 8);
-                        break;
+                        return Some(keycode_raw - 8);
                     }
                 }
-            }
-            found
-        });
+                None
+            });
 
         // Forward the key event to the guest wl_keyboard with the real serial/time.
         // Previously hardcoded 0 for both, which caused ChromeOS/Exo to reject events.
@@ -467,7 +445,6 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 text_change_cause: 0,
                 current_preedit: String::new(),
                 done_serial: 1,
-                commit_serial: 1,
                 host_serial: 0,
                 host_activated: false,
             },
@@ -586,10 +563,6 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         let guest_id = ctx.last_sender_id;
         log::info!(">>> v3 on_commit: guest_id={}", guest_id);
 
-        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-            state.commit_serial = state.commit_serial.wrapping_add(1).max(1);
-        }
-
         update_host_activation(ctx, guest_id);
 
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
@@ -692,7 +665,6 @@ mod tests {
                 text_change_cause: 0,
                 current_preedit: String::new(),
                 done_serial: 1,
-                commit_serial: 1,
                 host_serial: 0,
                 host_activated: false,
             },

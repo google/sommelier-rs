@@ -317,7 +317,6 @@ pub struct TextInputState {
     pub text_change_cause: u32,
     pub current_preedit: String,
     pub done_serial: u32,
-    pub commit_serial: u32,
     pub host_serial: u32,
     pub host_activated: bool,
 }
