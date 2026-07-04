@@ -209,10 +209,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     }
 
     fn on_modifiers_map(&mut self, _ctx: &mut Context, _map: &[u8]) -> Action {
+        log::info!(">>> on_modifiers_map: len={}", _map.len());
         Action::Drop
     }
 
     fn on_input_panel_state(&mut self, _ctx: &mut Context, _state: u32) -> Action {
+        log::info!(">>> on_input_panel_state: state={}", _state);
         Action::Drop
     }
 
@@ -223,14 +225,23 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         _length: u32,
         _style: u32,
     ) -> Action {
+        log::info!(
+            ">>> on_preedit_styling: index={}, length={}, style={}",
+            _index, _length, _style
+        );
         Action::Drop
     }
 
     fn on_preedit_cursor(&mut self, _ctx: &mut Context, _index: i32) -> Action {
+        log::info!(">>> on_preedit_cursor: index={}", _index);
         Action::Drop
     }
 
     fn on_cursor_position(&mut self, _ctx: &mut Context, _index: i32, _anchor: i32) -> Action {
+        log::info!(
+            ">>> on_cursor_position: index={}, anchor={}",
+            _index, _anchor
+        );
         Action::Drop
     }
 
@@ -383,6 +394,10 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         Action::Drop
     }
     fn on_clear_grammar_fragments(&mut self, _ctx: &mut Context, _start: u32, _end: u32) -> Action {
+        log::info!(
+            ">>> on_clear_grammar_fragments: start={}, end={}",
+            _start, _end
+        );
         Action::Drop
     }
     fn on_add_grammar_fragment(
@@ -392,9 +407,17 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         _end: u32,
         _suggestion: &String,
     ) -> Action {
+        log::info!(
+            ">>> on_add_grammar_fragment: start={}, end={}, suggestion={:?}",
+            _start, _end, _suggestion
+        );
         Action::Drop
     }
     fn on_set_autocorrect_range(&mut self, _ctx: &mut Context, _start: u32, _end: u32) -> Action {
+        log::info!(
+            ">>> on_set_autocorrect_range: start={}, end={}",
+            _start, _end
+        );
         Action::Drop
     }
     fn on_set_virtual_keyboard_occluded_bounds(
@@ -405,6 +428,10 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         _width: i32,
         _height: i32,
     ) -> Action {
+        log::info!(
+            ">>> on_set_virtual_keyboard_occluded_bounds: x={}, y={}, w={}, h={}",
+            _x, _y, _width, _height
+        );
         Action::Drop
     }
     fn on_confirm_preedit(&mut self, ctx: &mut Context, _selection_behavior: u32) -> Action {
@@ -447,6 +474,10 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
 pub struct TextInputManagerV3Handler;
 impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManagerV3Handler {
     fn on_get_text_input(&mut self, ctx: &mut Context, id: u32, seat: u32) -> Action {
+        log::info!(
+            ">>> v3 on_get_text_input: guest_id={}, seat={}",
+            id, seat
+        );
         let host_v1_id = ctx.shadow_table.allocate_host_id();
         let host_ext_id = ctx.shadow_table.allocate_host_id();
 

@@ -528,6 +528,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         mods_locked: u32,
         group: u32,
     ) -> Action {
+        log::info!(
+            ">>> wl_keyboard.on_modifiers: serial={}, depressed={:#x}, latched={:#x}, locked={:#x}, group={}",
+            _serial, mods_depressed, mods_latched, mods_locked, group
+        );
         if let Some(state) = &mut self.state {
             state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
 
@@ -571,8 +575,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     /// Using the typed [`GuestId`] / [`HostId`] wrappers makes a wrong-direction
     /// lookup a compile error.
     fn on_release(&mut self, ctx: &mut Context) -> Action {
-        // Translate guest ID → host ID. Returns None for unknown keyboards
-        // (e.g. keyboards that never received an on_enter event).
+        let guest_id = ctx.last_sender_id;
+        log::info!(">>> wl_keyboard.on_release: guest_id={}", guest_id);
         let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId::from_request_sender(ctx)) else {
             return Action::Forward;
         };
