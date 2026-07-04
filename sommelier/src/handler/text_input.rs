@@ -217,27 +217,16 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 0
             };
 
-            // Clamp u32→i32 to avoid panic on impossible lengths.
-            let length_i32 = i32::try_from(length).unwrap_or_else(|_| {
-                log::warn!(
-                    "on_delete_surrounding_text: length {} exceeds i32::MAX, clamping",
-                    length
-                );
-                i32::MAX
-            });
-
-            // Convert v3's cursor-relative index to v1's before/after lengths.
-            // index < 0 means delete before cursor; use i64 to avoid i32::MIN overflow
-            // when negating (-i32::MIN == i32::MIN due to two's complement).
-            let before_length = if index < 0 {
-                (-(index as i64)) as u32
-            } else {
-                0
-            };
-            let after_length = if index.saturating_add(length_i32) > 0 {
-                index.saturating_add(length_i32) as u32
-            } else {
-                0
+            // Convert v1's (index, length) to v3's (before_length, after_length).
+            // v1: delete `length` bytes starting at cursor + index.
+            // v3: delete `before_length` bytes before cursor, `after_length` after cursor.
+            // use i64 to avoid i32::MIN overflow when negating.
+            let (before_length, after_length) = {
+                let start = index as i64;
+                let end = start + length as i64;
+                let before = if start < 0 { (-start).min(length as i64) as u32 } else { 0 };
+                let after = if end > 0 { end as u32 } else { 0 };
+                (before, after)
             };
 
             // v1 delete_surrounding_text (opcode 4): before_length, after_length.
@@ -781,7 +770,7 @@ mod tests {
         let payload = &ctx.host_to_client_queue[0].0[8..];
         let before_length = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
         let after_length = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
-        assert_eq!(before_length, 5);
+        assert_eq!(before_length, 3);
         assert_eq!(after_length, 0);
     }
 
