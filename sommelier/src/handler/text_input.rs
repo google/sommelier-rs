@@ -554,8 +554,8 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
         update_host_activation(ctx, guest_id);
 
-            if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-                if state.surrounding_text_dirty {
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            if state.surrounding_text_dirty {
                 state.surrounding_text_dirty = false;
                 if let Some((text, cursor, anchor)) = &state.surrounding_text {
                     let mut builder = MessageBuilder::new();
