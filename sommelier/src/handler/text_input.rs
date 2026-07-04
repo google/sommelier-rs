@@ -139,7 +139,13 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         _modifiers: u32,
     ) -> Action {
         let host_id = ctx.last_sender_id;
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+        let sym_char = std::char::from_u32(sym).map(|c| c.to_string()).unwrap_or_default();
+        let guest_id = ctx.shadow_table.get_guest_id(host_id);
+        log::info!(
+            ">>> on_keysym: host_id={}, guest_id={:?}, serial={}, sym=0x{:x} ({:?}), state={}",
+            host_id, guest_id, serial, sym, sym_char, state
+        );
+        if let Some(guest_id) = guest_id {
             if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
                 s.host_serial = serial;
             }
@@ -167,18 +173,27 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 None
             });
 
-        // Forward the key event to the guest wl_keyboard with the real serial/time.
-        // Previously hardcoded 0 for both, which caused ChromeOS/Exo to reject events.
         if let Some(keycode) = found_keycode {
             let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
             if let Some(&keyboard_id) = keyboards.first() {
+                log::info!(
+                    "  -> forwarding wl_keyboard.key: keyboard_id={}, serial={}, time={}, keycode={}, state={}",
+                    keyboard_id, serial, time, keycode, state
+                );
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(serial);
                 builder.write_u32(time);
                 builder.write_u32(keycode);
                 builder.write_u32(state);
                 push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
+            } else {
+                log::warn!("  -> no wl_keyboard found to forward keysym to");
             }
+        } else {
+            log::warn!(
+                "  -> could not find keycode for sym=0x{:x} ({:?})",
+                sym, sym_char
+            );
         }
         Action::Drop
     }
@@ -221,7 +236,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
     fn on_delete_surrounding_text(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_id = ctx.last_sender_id;
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+        let guest_id = ctx.shadow_table.get_guest_id(host_id);
+        log::info!(
+            ">>> on_delete_surrounding_text: host_id={}, guest_id={:?}, index={}, length={}",
+            host_id, guest_id, index, length
+        );
+        if let Some(guest_id) = guest_id {
             let done_serial = ctx.text_inputs.get_mut(&guest_id).map_or(0, |s| {
                 let serial = s.done_serial;
                 s.done_serial = s.done_serial.wrapping_add(1).max(1);
@@ -240,13 +260,16 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 (before, after)
             };
 
-            // v1 delete_surrounding_text (opcode 4): before_length, after_length.
+            log::info!(
+                "  -> sending v3 delete_surrounding_text(before={}, after={}) + done({})",
+                before_length, after_length, done_serial
+            );
+
             let mut builder = MessageBuilder::new();
             builder.write_u32(before_length);
             builder.write_u32(after_length);
             push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
 
-            // v3 done (opcode 5) to commit the delete.
             let mut builder = MessageBuilder::new();
             builder.write_u32(done_serial);
             push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
@@ -256,8 +279,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
     fn on_language(&mut self, ctx: &mut Context, serial: u32, _language: &String) -> Action {
         let host_id = ctx.last_sender_id;
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            // Track serial so the next commit_state sends it to the host.
+        let guest_id = ctx.shadow_table.get_guest_id(host_id);
+        log::info!(
+            ">>> on_language: host_id={}, guest_id={:?}, serial={}, language={:?}",
+            host_id, guest_id, serial, _language
+        );
+        if let Some(guest_id) = guest_id {
             if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
                 s.host_serial = serial;
             }
@@ -267,8 +294,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
     fn on_text_direction(&mut self, ctx: &mut Context, serial: u32, _direction: u32) -> Action {
         let host_id = ctx.last_sender_id;
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            // Track serial so the next commit_state sends it to the host.
+        let guest_id = ctx.shadow_table.get_guest_id(host_id);
+        log::info!(
+            ">>> on_text_direction: host_id={}, guest_id={:?}, serial={}, direction={}",
+            host_id, guest_id, serial, _direction
+        );
+        if let Some(guest_id) = guest_id {
             if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
                 s.host_serial = serial;
             }
@@ -286,6 +317,10 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     // into zwp_text_input_v1::delete_surrounding_text + preedit_string + done.
     fn on_set_preedit_region(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
+        log::info!(
+            ">>> on_set_preedit_region: host_ext_id={}, index={}, length={}",
+            host_ext_id, index, length
+        );
 
         if let Some((&guest_id, state)) = ctx
             .text_inputs
@@ -374,12 +409,20 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     }
     fn on_confirm_preedit(&mut self, ctx: &mut Context, _selection_behavior: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
+        log::info!(
+            ">>> on_confirm_preedit: host_ext_id={}, selection_behavior={}",
+            host_ext_id, _selection_behavior
+        );
         if let Some((&guest_id, state)) = ctx
             .text_inputs
             .iter_mut()
             .find(|(_, s)| s.host_ext_id == host_ext_id)
         {
             let preedit_text = state.current_preedit.clone();
+            log::info!(
+                "  -> committing cached preedit={:?}, guest_id={}",
+                preedit_text, guest_id
+            );
             let done_serial = {
                 let serial = state.done_serial;
                 state.done_serial = state.done_serial.wrapping_add(1).max(1);
@@ -526,6 +569,10 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         anchor: i32,
     ) -> Action {
         let guest_id = ctx.last_sender_id;
+        log::info!(
+            ">>> v3 on_set_surrounding_text: guest_id={}, text={:?}, cursor={}, anchor={}",
+            guest_id, text, cursor, anchor
+        );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.surrounding_text = Some((text.clone(), cursor, anchor));
             state.surrounding_text_dirty = true;
@@ -535,6 +582,10 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
     fn on_set_text_change_cause(&mut self, ctx: &mut Context, cause: u32) -> Action {
         let guest_id = ctx.last_sender_id;
+        log::info!(
+            ">>> v3 on_text_change_cause: guest_id={}, cause={}",
+            guest_id, cause
+        );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.text_change_cause = cause;
         }
@@ -543,6 +594,10 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
     fn on_set_content_type(&mut self, ctx: &mut Context, hint: u32, purpose: u32) -> Action {
         let guest_id = ctx.last_sender_id;
+        log::info!(
+            ">>> v3 on_set_content_type: guest_id={}, hint={}, purpose={}",
+            guest_id, hint, purpose
+        );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.content_hint = hint;
             state.content_purpose = purpose;
@@ -559,6 +614,10 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         height: i32,
     ) -> Action {
         let guest_id = ctx.last_sender_id;
+        log::info!(
+            ">>> v3 on_set_cursor_rectangle: guest_id={}, rect=({}, {}, {}, {})",
+            guest_id, x, y, width, height
+        );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.cursor_rect = Some((x, y, width, height));
         }
@@ -567,7 +626,9 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
     fn on_commit(&mut self, ctx: &mut Context) -> Action {
         let guest_id = ctx.last_sender_id;
-        log::info!(">>> v3 on_commit: guest_id={}", guest_id);
+        log::info!(">>> v3 on_commit: guest_id={}, enabled={}, host_v1_id={}", guest_id,
+            ctx.text_inputs.get(&guest_id).map(|s| s.enabled).unwrap_or(false),
+            ctx.text_inputs.get(&guest_id).map(|s| s.host_v1_id).unwrap_or(0));
 
         update_host_activation(ctx, guest_id);
 
@@ -575,6 +636,10 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             if state.surrounding_text_dirty {
                 state.surrounding_text_dirty = false;
                 if let Some((text, cursor, anchor)) = &state.surrounding_text {
+                    log::info!(
+                        "  -> sending v1 set_surrounding_text({:?}, cursor={}, anchor={})",
+                        text, cursor, anchor
+                    );
                     let mut builder = MessageBuilder::new();
                     builder.write_string(text);
                     builder.write_u32(*cursor as u32);
@@ -613,6 +678,10 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             }
 
             if let Some((x, y, w, h)) = state.cursor_rect.take() {
+                log::info!(
+                    "  -> sending v1 set_cursor_rectangle({}, {}, {}, {})",
+                    x, y, w, h
+                );
                 let mut builder = MessageBuilder::new();
                 builder.write_i32(x);
                 builder.write_i32(y);
@@ -621,6 +690,10 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 7, builder);
             }
 
+            log::info!(
+                "  -> sending v1 commit_state(serial={})",
+                state.host_serial
+            );
             let mut builder = MessageBuilder::new();
             builder.write_u32(state.host_serial);
             push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 9, builder);

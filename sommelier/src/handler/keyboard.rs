@@ -378,25 +378,28 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
-        // Lazily bind the extended keyboard object on first enter.
-        // This sends zcr_keyboard_extension_v1.get_extended_keyboard to the
-        // host, which enables ack mode (SetNeedKeyboardKeyAcks(true) in Exo).
         Self::ensure_extended_keyboard_bound(ctx, host_keyboard_id);
 
-        // Defer activation updates until after the loop so we don't borrow ctx
-        // while iterating over text_inputs.
+        log::info!(
+            ">>> wl_keyboard.on_enter: host_kb={:?}, guest_kb={}, surface={}, guest_surface={}",
+            host_keyboard_id, guest_keyboard_id, surface, guest_surface_id
+        );
+
         let mut text_inputs_to_update = Vec::new();
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
+                log::info!("  -> seat_id={}: setting active_surface={}", guest_seat_id, guest_surface_id);
                 ctx.active_surface_for_seat
                     .insert(guest_seat_id, guest_surface_id);
 
-                // Find the v3 text input for this seat
                 for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
                     if state.guest_seat == guest_seat_id {
+                        log::info!(
+                            "  -> text_input {}: active_surface = {}",
+                            guest_text_input_id, guest_surface_id
+                        );
                         state.active_surface = Some(guest_surface_id);
 
-                        // Send zwp_text_input_v3.enter (opcode 0)
                         let mut builder = MessageBuilder::new();
                         builder.write_u32(guest_surface_id);
                         let msg = builder.build_message(*guest_text_input_id, 0);
@@ -404,6 +407,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         text_inputs_to_update.push(*guest_text_input_id);
                     }
                 }
+            } else {
+                log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
             }
         }
 
@@ -421,18 +426,25 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
-        // Same deferred pattern as on_enter.
+        log::info!(
+            ">>> wl_keyboard.on_leave: host_kb={:?}, guest_kb={}, surface={}, guest_surface={}",
+            host_keyboard_id, guest_keyboard_id, surface, guest_surface_id
+        );
+
         let mut text_inputs_to_update = Vec::new();
         if guest_surface_id != 0 {
             if let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) {
+                log::info!("  -> seat_id={}: removing active_surface", guest_seat_id);
                 ctx.active_surface_for_seat.remove(&guest_seat_id);
 
-                // Find the v3 text input for this seat
                 for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
                     if state.guest_seat == guest_seat_id {
+                        log::info!(
+                            "  -> text_input {}: active_surface = None",
+                            guest_text_input_id
+                        );
                         state.active_surface = None;
 
-                        // Send zwp_text_input_v3.leave (opcode 1)
                         let mut builder = MessageBuilder::new();
                         builder.write_u32(guest_surface_id);
                         let msg = builder.build_message(*guest_text_input_id, 1);
@@ -440,6 +452,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                         text_inputs_to_update.push(*guest_text_input_id);
                     }
                 }
+            } else {
+                log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
             }
         }
 
