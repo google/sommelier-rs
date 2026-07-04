@@ -24,19 +24,6 @@ use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
 use std::os::unix::io::RawFd;
 
-/// Returns true if `s` contains only Hangul jamo (partial composition characters
-/// that should not be committed independently).
-fn is_only_jamo(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| {
-        matches!(c,
-            '\u{1100}'..='\u{11FF}'   // Hangul Jamo
-            | '\u{3130}'..='\u{318F}' // Hangul Compatibility Jamo
-            | '\u{A960}'..='\u{A97F}' // Hangul Jamo Extended-A
-            | '\u{D7B0}'..='\u{D7FF}' // Hangul Jamo Extended-B
-        )
-    })
-}
-
 fn push_msg(
     queue: &mut Vec<(Vec<u8>, Vec<RawFd>)>,
     sender_id: u32,
@@ -75,29 +62,15 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     ) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            // Capture old preedit before state update.
-            let old_preedit = ctx.text_inputs.get(&guest_id)
-                .map(|s| s.current_preedit.clone()).unwrap_or_default();
-
             let done_serial = with_state(ctx, guest_id, |s| {
                 s.host_serial = serial;
                 s.current_preedit = text.clone();
             });
 
             log::info!(
-                ">>> on_preedit_string: serial={}, text={:?}, commit={:?}, old={:?}, guest_id={}, done_serial={}",
-                serial, text, commit, old_preedit, guest_id, done_serial
+                ">>> on_preedit_string: serial={}, text={:?}, commit={:?}, guest_id={}, done_serial={}",
+                serial, text, commit, guest_id, done_serial
             );
-
-            // v1 silently commits the old preedit when the IME replaces it.
-            // v3 needs an explicit commit_string for this, otherwise the text is lost.
-            // Don't commit partial jamo composition (e.g. "ㄱ" → "가").
-            if !old_preedit.is_empty() && old_preedit != *text && !is_only_jamo(&old_preedit) {
-                log::info!("  -> committing old preedit {:?}", old_preedit);
-                let mut builder = MessageBuilder::new();
-                builder.write_string(&old_preedit);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
-            }
 
             // v3 preedit_string (opcode 2): cursor_end = text.len() selects entire preedit.
             let mut builder = MessageBuilder::new();
