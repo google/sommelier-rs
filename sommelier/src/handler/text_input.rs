@@ -355,62 +355,64 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             return Action::Drop;
         };
 
-        if let Some((text, cursor, _anchor)) = state.surrounding_text.as_ref() {
-            let done_serial = {
-                let serial = state.done_serial;
-                state.done_serial = state.done_serial.wrapping_add(1).max(1);
-                serial
-            };
-            let cursor_i64 = *cursor as i64;
-            let index_i64 = index as i64;
-            let start_idx = cursor_i64 + index_i64;
-            let length_i64 = length as i64;
-
-            if start_idx >= 0
-                && start_idx + length_i64 <= text.len() as i64
-                && text.is_char_boundary(start_idx as usize)
-                && text.is_char_boundary((start_idx + length_i64) as usize)
-            {
-                let preedit_text =
-                    text[start_idx as usize..(start_idx + length_i64) as usize].to_string();
-                let before_length = if start_idx < cursor_i64 {
-                    (cursor_i64 - start_idx) as u32
-                } else {
-                    0
-                };
-                let after_length = if start_idx + length_i64 > cursor_i64 {
-                    (start_idx + length_i64 - cursor_i64) as u32
-                } else {
-                    0
-                };
-                state.current_preedit = preedit_text.clone();
-
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(before_length);
-                builder.write_u32(after_length);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
-
-                let mut builder = MessageBuilder::new();
-                builder.write_string(&preedit_text);
-                builder.write_i32(0);
-                builder.write_i32(preedit_text.len() as i32);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
-
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(done_serial);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-            } else {
-                log::warn!(
-                    "on_set_preedit_region: calculated range [{}, {}] is out of bounds or invalid for text of length {}",
-                    start_idx, start_idx + length_i64, text.len()
-                );
-            }
-        } else {
+        let Some((text, cursor, _anchor)) = state.surrounding_text.as_ref() else {
             log::warn!(
                 "on_set_preedit_region: no surrounding text available for host_ext_id={}",
                 host_ext_id
             );
+            return Action::Drop;
+        };
+
+        let done_serial = {
+            let serial = state.done_serial;
+            state.done_serial = state.done_serial.wrapping_add(1).max(1);
+            serial
+        };
+        let cursor_i64 = *cursor as i64;
+        let index_i64 = index as i64;
+        let start_idx = cursor_i64 + index_i64;
+        let length_i64 = length as i64;
+
+        if !(start_idx >= 0
+            && start_idx + length_i64 <= text.len() as i64
+            && text.is_char_boundary(start_idx as usize)
+            && text.is_char_boundary((start_idx + length_i64) as usize))
+        {
+            log::warn!(
+                "on_set_preedit_region: calculated range [{}, {}] is out of bounds or invalid for text of length {}",
+                start_idx, start_idx + length_i64, text.len()
+            );
+            return Action::Drop;
         }
+
+        let preedit_text =
+            text[start_idx as usize..(start_idx + length_i64) as usize].to_string();
+        let before_length = if start_idx < cursor_i64 {
+            (cursor_i64 - start_idx) as u32
+        } else {
+            0
+        };
+        let after_length = if start_idx + length_i64 > cursor_i64 {
+            (start_idx + length_i64 - cursor_i64) as u32
+        } else {
+            0
+        };
+        state.current_preedit = preedit_text.clone();
+
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(before_length);
+        builder.write_u32(after_length);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
+
+        let mut builder = MessageBuilder::new();
+        builder.write_string(&preedit_text);
+        builder.write_i32(0); // cursor_begin
+        builder.write_i32(preedit_text.len() as i32); // cursor_end
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
 
         Action::Drop
     }
