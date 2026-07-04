@@ -461,7 +461,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     }
     fn on_confirm_preedit(&mut self, ctx: &mut Context, _selection_behavior: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
-        log::info!(
+        log::trace!(
             ">>> on_confirm_preedit: host_ext_id={}, selection_behavior={}",
             host_ext_id, _selection_behavior
         );
@@ -472,7 +472,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             return Action::Drop;
         };
         let preedit_text = state.current_preedit.clone();
-        log::info!(
+        log::debug!(
             "  -> committing cached preedit={:?}, guest_id={}",
             preedit_text, guest_id
         );
