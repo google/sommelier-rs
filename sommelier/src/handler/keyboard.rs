@@ -373,10 +373,14 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         surface: u32, // Host ID
         _keys: &[u8],
     ) -> Action {
+        // on_enter is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
+        // Lazily bind the extended keyboard object on first enter.
+        // This sends zcr_keyboard_extension_v1.get_extended_keyboard to the
+        // host, which enables ack mode (SetNeedKeyboardKeyAcks(true) in Exo).
         Self::ensure_extended_keyboard_bound(ctx, host_keyboard_id);
 
         log::info!(
@@ -395,6 +399,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         ctx.active_surface_for_seat.insert(guest_seat_id, guest_surface_id);
 
         let mut text_inputs_to_update = Vec::new();
+        // Find the v3 text input for this seat.
         for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
             if state.guest_seat == guest_seat_id {
                 log::info!(
@@ -403,6 +408,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 );
                 state.active_surface = Some(guest_surface_id);
 
+                // Send zwp_text_input_v3.enter (opcode 0).
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(guest_surface_id);
                 let msg = builder.build_message(*guest_text_input_id, 0);
@@ -419,6 +425,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     }
 
     fn on_leave(&mut self, ctx: &mut Context, _serial: u32, surface: u32) -> Action {
+        // on_leave is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
@@ -439,6 +446,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         ctx.active_surface_for_seat.remove(&guest_seat_id);
 
         let mut text_inputs_to_update = Vec::new();
+        // Find the v3 text input for this seat.
         for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
             if state.guest_seat == guest_seat_id {
                 log::info!(
@@ -447,6 +455,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 );
                 state.active_surface = None;
 
+                // Send zwp_text_input_v3.leave (opcode 1).
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(guest_surface_id);
                 let msg = builder.build_message(*guest_text_input_id, 1);
@@ -590,6 +599,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     fn on_release(&mut self, ctx: &mut Context) -> Action {
         let guest_id = ctx.last_sender_id;
         log::info!(">>> wl_keyboard.on_release: guest_id={}", guest_id);
+        // Translate guest ID → host ID. Returns None for unknown keyboards
+        // (e.g. keyboards that never received an on_enter event).
         let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId::from_request_sender(ctx)) else {
             return Action::Forward;
         };
