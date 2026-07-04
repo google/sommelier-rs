@@ -486,8 +486,8 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             );
             let mut builder = MessageBuilder::new();
             builder.write_string("");
-            builder.write_i32(0);
-            builder.write_i32(0);
+            builder.write_i32(0); // cursor_begin
+            builder.write_i32(0); // cursor_end
             push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
             let mut builder = MessageBuilder::new();
@@ -505,17 +505,17 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                 );
 
                 let mut builder = MessageBuilder::new();
-                builder.write_u32(0);
-                builder.write_u32(0);
-                builder.write_u32(KEY_BACKSPACE);
-                builder.write_u32(1);
+                builder.write_u32(0); // serial
+                builder.write_u32(0); // time
+                builder.write_u32(KEY_BACKSPACE); // key
+                builder.write_u32(1); // state (pressed)
                 push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
 
                 let mut builder = MessageBuilder::new();
-                builder.write_u32(0);
-                builder.write_u32(0);
-                builder.write_u32(KEY_BACKSPACE);
-                builder.write_u32(0);
+                builder.write_u32(0); // serial
+                builder.write_u32(0); // time
+                builder.write_u32(KEY_BACKSPACE); // key
+                builder.write_u32(0); // state (released)
                 push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
             } else {
                 log::warn!("  -> no wl_keyboard found for backspace synthesis");
