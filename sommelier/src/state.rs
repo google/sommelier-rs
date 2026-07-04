@@ -309,7 +309,6 @@ pub struct TextInputState {
     pub guest_seat: u32,
     pub active_surface: Option<u32>,
     pub enabled: bool,
-    pub enabled_changed: bool,
     pub surrounding_text: Option<(String, i32, i32)>,
     pub surrounding_text_dirty: bool,
     pub content_hint: u32,

@@ -425,7 +425,6 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 guest_seat: seat,
                 active_surface,
                 enabled: false,
-                enabled_changed: false,
                 surrounding_text: None,
                 surrounding_text_dirty: false,
                 content_hint: 0,
@@ -487,7 +486,6 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         let guest_id = ctx.last_sender_id;
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.enabled = true;
-            state.enabled_changed = true;
         }
         Action::Drop
     }
@@ -496,7 +494,6 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         let guest_id = ctx.last_sender_id;
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.enabled = false;
-            state.enabled_changed = true;
         }
         Action::Drop
     }
@@ -557,10 +554,8 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
         update_host_activation(ctx, guest_id);
 
-        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-            state.enabled_changed = false;
-
-            if state.surrounding_text_dirty {
+            if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+                if state.surrounding_text_dirty {
                 state.surrounding_text_dirty = false;
                 if let Some((text, cursor, anchor)) = &state.surrounding_text {
                     let mut builder = MessageBuilder::new();
@@ -651,7 +646,6 @@ mod tests {
                 guest_seat: 0,
                 active_surface: None,
                 enabled: true,
-                enabled_changed: false,
                 surrounding_text: None,
                 surrounding_text_dirty: false,
                 content_hint: 0,
