@@ -67,6 +67,9 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 // Preedit going from non-empty to empty → cleared by backspace
                 if !s.current_preedit.is_empty() && text.is_empty() {
                     s.preedit_cleared_for_backspace = true;
+                } else if !text.is_empty() {
+                    // New composition starting → end of backspace burst
+                    s.preedit_cleared_for_backspace = false;
                 }
                 s.current_preedit = text.clone();
             });
@@ -206,13 +209,21 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         Action::Drop
     }
 
-    fn on_enter(&mut self, _ctx: &mut Context, surface: u32) -> Action {
+    fn on_enter(&mut self, ctx: &mut Context, surface: u32) -> Action {
+        let host_v1_id = ctx.last_sender_id;
         log::info!(">>> on_enter: surface={}", surface);
+        if let Some((_, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_v1_id == host_v1_id) {
+            state.preedit_cleared_for_backspace = false;
+        }
         Action::Drop
     }
 
-    fn on_leave(&mut self, _ctx: &mut Context) -> Action {
+    fn on_leave(&mut self, ctx: &mut Context) -> Action {
+        let host_v1_id = ctx.last_sender_id;
         log::info!(">>> on_leave");
+        if let Some((_, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_v1_id == host_v1_id) {
+            state.preedit_cleared_for_backspace = false;
+        }
         Action::Drop
     }
 
@@ -478,7 +489,8 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                 builder.write_u32(done_serial);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
             } else if state.preedit_cleared_for_backspace {
-                state.preedit_cleared_for_backspace = false;
+                // Flag is sticky — stays true for entire backspace burst.
+                // Cleared by: new non-empty preedit, on_enter, on_leave, on_enable, on_disable.
                 let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
                 if let Some(&keyboard_id) = keyboards.first() {
                     const KEY_BACKSPACE: u32 = 14;
@@ -631,6 +643,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         log::info!(">>> v3 on_enable: guest_id={}", guest_id);
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.enabled = true;
+            state.preedit_cleared_for_backspace = false;
         }
         Action::Drop
     }
@@ -640,6 +653,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         log::info!(">>> v3 on_disable: guest_id={}", guest_id);
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.enabled = false;
+            state.preedit_cleared_for_backspace = false;
         }
         Action::Drop
     }
