@@ -72,24 +72,11 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 serial, text, commit, guest_id, done_serial
             );
 
-            // PROBLEM: Korean IME drops intermediate syllables (e.g., "가나다라마바사" → "가다마사").
-            // DIAGNOSIS:
-            //   The v1 `preedit_string` event has a `commit` parameter containing the text that
-            //   would be committed if the preedit were finalized. For Korean input, the IME always
-            //   sets commit == text, and changes it on every keystroke (ㄱ→가→간→나→ㄷ→다→...).
-            //   v1 compositors implicitly commit the old commit text when preedit changes to a
-            //   *different* syllable — they can distinguish same-syllable composition (ㄱ→가→간)
-            //   from syllable transition (나→ㄷ) because GTK's IM context handles Korean internally.
-            //   v3 has no `commit` parameter and no implicit commit — every commit requires an
-            //   explicit `commit_string` event.
-            // WHY UNFIXABLE:
-            //   Same-syllable composition and syllable transition are indistinguishable at the
-            //   protocol level — both are just `preedit_string` with changed text. The only way
-            //   to tell them apart is language-specific heuristics (e.g., detecting Hangul jamo
-            //   vs composed syllables), which we rejected as too hacky.
-            // WORKAROUND:
-            //   Type spaces between syllables (e.g., "가 나 다") forces the IME to send explicit
-            //   commit_string for each syllable. Other languages/IMEs are unaffected.
+            // TODO: Korean IME drops intermediate syllables in continuous input
+            // (e.g., "가나다라마바사" → "가다마사"). The v1 `commit` parameter changes with
+            // every keystroke, but same-syllable composition and syllable transition are
+            // indistinguishable at the protocol level. v3 has no `commit` parameter or
+            // implicit commit mechanism, so these events are lost in translation.
 
             // v3 preedit_string (opcode 2): cursor_end = text.len() selects entire preedit.
             let mut builder = MessageBuilder::new();
