@@ -484,7 +484,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // on_key is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
         let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
-        log::info!(
+        log::trace!(
             ">>> wl_keyboard.on_key: host_kb={:?}, guest_kb={}, serial={}, key={}, state={}",
             host_keyboard_id, guest_keyboard_id, serial, key, state
         );
@@ -501,7 +501,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             WL_KEY_PRESSED => {
                 // Key pressed: check if this is a host accelerator.
                 if self.is_host_accelerator(&ctx.accelerators, key) {
-                    log::info!("  -> accelerator key, dropping");
+                    log::debug!("  -> accelerator key, dropping");
                     action = Action::Drop;
                     handled = false;
                     self.dropped_keys.insert(key);
@@ -526,7 +526,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             }
         }
 
-        log::info!("  -> action={:?}", action);
+        log::debug!("  -> action={:?}", action);
         action
     }
 

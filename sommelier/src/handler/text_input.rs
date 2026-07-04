@@ -76,7 +76,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             s.current_preedit = text.clone();
         });
 
-        log::info!(
+        log::trace!(
             ">>> on_preedit_string: serial={}, text={:?}, commit={:?}, guest_id={}, done_serial={}",
             serial, text, commit, guest_id, done_serial
         );
@@ -95,7 +95,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
         // v3 done (opcode 5): signals the guest that the preedit update is complete.
-        log::info!("  -> sending v3 preedit_string({:?}) + done({})", text, done_serial);
+        log::debug!("  -> sending v3 preedit_string({:?}) + done({})", text, done_serial);
         let mut builder = MessageBuilder::new();
         builder.write_u32(done_serial);
         push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
@@ -113,11 +113,11 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             s.preedit_cleared_for_backspace = false;
         });
 
-        log::info!(
+        log::trace!(
             ">>> on_commit_string: serial={}, text={:?}, guest_id={}, done_serial={}",
             serial, text, guest_id, done_serial
         );
-        log::info!("  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})", text, done_serial);
+        log::debug!("  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})", text, done_serial);
 
         // Explicitly clear preedit before commit — without this the guest
         // may keep a stale underline after committing the final text.
@@ -151,7 +151,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         let host_id = ctx.last_sender_id;
         let sym_char = std::char::from_u32(sym).map(|c| c.to_string()).unwrap_or_default();
         let guest_id = ctx.shadow_table.get_guest_id(host_id);
-        log::info!(
+        log::trace!(
             ">>> on_keysym: host_id={}, guest_id={:?}, serial={}, sym=0x{:x} ({:?}), state={}",
             host_id, guest_id, serial, sym, sym_char, state
         );
@@ -186,7 +186,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         if let Some(keycode) = found_keycode {
             let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
             if let Some(&keyboard_id) = keyboards.first() {
-                log::info!(
+                log::debug!(
                     "  -> forwarding wl_keyboard.key: keyboard_id={}, serial={}, time={}, keycode={}, state={}",
                     keyboard_id, serial, time, keycode, state
                 );
@@ -212,6 +212,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_enter(&mut self, ctx: &mut Context, surface: u32) -> Action {
         let host_v1_id = ctx.last_sender_id;
         log::info!(">>> on_enter: surface={}", surface);
+
         if let Some((_, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_v1_id == host_v1_id) {
             state.preedit_cleared_for_backspace = false;
         }
@@ -221,6 +222,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_leave(&mut self, ctx: &mut Context) -> Action {
         let host_v1_id = ctx.last_sender_id;
         log::info!(">>> on_leave: host_v1_id={}", host_v1_id);
+
         if let Some((_, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_v1_id == host_v1_id) {
             state.preedit_cleared_for_backspace = false;
         }
@@ -228,12 +230,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     }
 
     fn on_modifiers_map(&mut self, _ctx: &mut Context, _map: &[u8]) -> Action {
-        log::info!(">>> on_modifiers_map: len={}", _map.len());
+        log::trace!(">>> on_modifiers_map: len={}", _map.len());
         Action::Drop
     }
 
     fn on_input_panel_state(&mut self, _ctx: &mut Context, _state: u32) -> Action {
-        log::info!(">>> on_input_panel_state: state={}", _state);
+        log::trace!(">>> on_input_panel_state: state={}", _state);
         Action::Drop
     }
 
@@ -244,7 +246,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         _length: u32,
         _style: u32,
     ) -> Action {
-        log::info!(
+        log::trace!(
             ">>> on_preedit_styling: index={}, length={}, style={}",
             _index, _length, _style
         );
@@ -252,12 +254,12 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     }
 
     fn on_preedit_cursor(&mut self, _ctx: &mut Context, _index: i32) -> Action {
-        log::info!(">>> on_preedit_cursor: index={}", _index);
+        log::trace!(">>> on_preedit_cursor: index={}", _index);
         Action::Drop
     }
 
     fn on_cursor_position(&mut self, _ctx: &mut Context, _index: i32, _anchor: i32) -> Action {
-        log::info!(
+        log::trace!(
             ">>> on_cursor_position: index={}, anchor={}",
             _index, _anchor
         );
@@ -269,7 +271,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) else {
             return Action::Drop;
         };
-        log::info!(
+        log::trace!(
             ">>> on_delete_surrounding_text: host_id={}, guest_id={:?}, index={}, length={}",
             host_id, guest_id, index, length
         );
@@ -287,7 +289,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             (before, after)
         };
 
-        log::info!(
+        log::debug!(
             "  -> sending v3 delete_surrounding_text(before={}, after={}) + done({})",
             before_length, after_length, done_serial
         );
@@ -306,7 +308,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_language(&mut self, ctx: &mut Context, serial: u32, _language: &String) -> Action {
         let host_id = ctx.last_sender_id;
         let guest_id = ctx.shadow_table.get_guest_id(host_id);
-        log::info!(
+        log::trace!(
             ">>> on_language: host_id={}, guest_id={:?}, serial={}, language={:?}",
             host_id, guest_id, serial, _language
         );
@@ -321,7 +323,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_text_direction(&mut self, ctx: &mut Context, serial: u32, _direction: u32) -> Action {
         let host_id = ctx.last_sender_id;
         let guest_id = ctx.shadow_table.get_guest_id(host_id);
-        log::info!(
+        log::trace!(
             ">>> on_text_direction: host_id={}, guest_id={:?}, serial={}, direction={}",
             host_id, guest_id, serial, _direction
         );
@@ -343,7 +345,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     // into zwp_text_input_v1::delete_surrounding_text + preedit_string + done.
     fn on_set_preedit_region(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
-        log::info!(
+        log::trace!(
             ">>> on_set_preedit_region: host_ext_id={}, index={}, length={}",
             host_ext_id, index, length
         );
@@ -417,7 +419,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         Action::Drop
     }
     fn on_clear_grammar_fragments(&mut self, _ctx: &mut Context, _start: u32, _end: u32) -> Action {
-        log::info!(
+        log::trace!(
             ">>> on_clear_grammar_fragments: start={}, end={}",
             _start, _end
         );
@@ -430,14 +432,14 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         _end: u32,
         _suggestion: &String,
     ) -> Action {
-        log::info!(
+        log::trace!(
             ">>> on_add_grammar_fragment: start={}, end={}, suggestion={:?}",
             _start, _end, _suggestion
         );
         Action::Drop
     }
     fn on_set_autocorrect_range(&mut self, _ctx: &mut Context, _start: u32, _end: u32) -> Action {
-        log::info!(
+        log::trace!(
             ">>> on_set_autocorrect_range: start={}, end={}",
             _start, _end
         );
@@ -451,7 +453,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         _width: i32,
         _height: i32,
     ) -> Action {
-        log::info!(
+        log::trace!(
             ">>> on_set_virtual_keyboard_occluded_bounds: x={}, y={}, w={}, h={}",
             _x, _y, _width, _height
         );
@@ -482,10 +484,10 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         state.current_preedit.clear();
 
         if !preedit_text.is_empty() {
-            log::info!(
-                "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
-                preedit_text, done_serial
-            );
+        log::debug!(
+            "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
+            preedit_text, done_serial
+        );
             let mut builder = MessageBuilder::new();
             builder.write_string("");
             builder.write_i32(0); // cursor_begin
@@ -501,7 +503,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
             if let Some(&keyboard_id) = keyboards.first() {
                 const KEY_BACKSPACE: u32 = 14;
-                log::info!(
+                log::debug!(
                     "  -> empty preedit after backspace clear, synthesizing wl_keyboard.key({}) press+release, done({})",
                     KEY_BACKSPACE, done_serial
                 );
@@ -523,7 +525,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                 log::warn!("  -> no wl_keyboard found for backspace synthesis");
             }
         } else {
-            log::info!(
+            log::debug!(
                 "  -> empty preedit (no backspace context), sending just done({})",
                 done_serial
             );
@@ -539,7 +541,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
 pub struct TextInputManagerV3Handler;
 impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManagerV3Handler {
     fn on_get_text_input(&mut self, ctx: &mut Context, id: u32, seat: u32) -> Action {
-        log::info!(
+        log::trace!(
             ">>> v3 on_get_text_input: guest_id={}, seat={}",
             id, seat
         );
@@ -670,7 +672,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         anchor: i32,
     ) -> Action {
         let guest_id = ctx.last_sender_id;
-        log::info!(
+        log::trace!(
             ">>> v3 on_set_surrounding_text: guest_id={}, text={:?}, cursor={}, anchor={}",
             guest_id, text, cursor, anchor
         );
@@ -683,7 +685,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
     fn on_set_text_change_cause(&mut self, ctx: &mut Context, cause: u32) -> Action {
         let guest_id = ctx.last_sender_id;
-        log::info!(
+        log::trace!(
             ">>> v3 on_text_change_cause: guest_id={}, cause={}",
             guest_id, cause
         );
@@ -695,7 +697,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
     fn on_set_content_type(&mut self, ctx: &mut Context, hint: u32, purpose: u32) -> Action {
         let guest_id = ctx.last_sender_id;
-        log::info!(
+        log::trace!(
             ">>> v3 on_set_content_type: guest_id={}, hint={}, purpose={}",
             guest_id, hint, purpose
         );
@@ -715,7 +717,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         height: i32,
     ) -> Action {
         let guest_id = ctx.last_sender_id;
-        log::info!(
+        log::trace!(
             ">>> v3 on_set_cursor_rectangle: guest_id={}, rect=({}, {}, {}, {})",
             guest_id, x, y, width, height
         );
@@ -727,7 +729,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 
     fn on_commit(&mut self, ctx: &mut Context) -> Action {
         let guest_id = ctx.last_sender_id;
-        log::info!(">>> v3 on_commit: guest_id={}, enabled={}, host_v1_id={}", guest_id,
+        log::trace!(">>> v3 on_commit: guest_id={}, enabled={}, host_v1_id={}", guest_id,
             ctx.text_inputs.get(&guest_id).map(|s| s.enabled).unwrap_or(false),
             ctx.text_inputs.get(&guest_id).map(|s| s.host_v1_id).unwrap_or(0));
 
@@ -739,7 +741,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         if state.surrounding_text_dirty {
             state.surrounding_text_dirty = false;
             if let Some((text, cursor, anchor)) = &state.surrounding_text {
-                log::info!(
+                log::debug!(
                     "  -> sending v1 set_surrounding_text({:?}, cursor={}, anchor={})",
                     text, cursor, anchor
                 );
@@ -787,7 +789,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         }
 
         if let Some((x, y, w, h)) = state.cursor_rect.take() {
-            log::info!(
+            log::debug!(
                 "  -> sending v1 set_cursor_rectangle({}, {}, {}, {})",
                 x, y, w, h
             );
@@ -800,7 +802,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 7, builder);
         }
 
-        log::info!(
+        log::debug!(
             "  -> sending v1 commit_state(serial={})",
             state.host_serial
         );
