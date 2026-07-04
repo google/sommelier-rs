@@ -33,6 +33,19 @@ fn push_msg(
     queue.push((builder.build_message(sender_id, opcode), Vec::new()));
 }
 
+fn with_state<F>(ctx: &mut Context, guest_id: u32, f: F) -> u32
+where
+    F: FnOnce(&mut crate::state::TextInputState),
+{
+    match ctx.text_inputs.get_mut(&guest_id) {
+        Some(state) => {
+            f(state);
+            state.commit_serial
+        }
+        None => 0,
+    }
+}
+
 pub struct TextInputManagerV1Handler;
 impl zwp_text_input_manager_v1::ZwpTextInputManagerV1Handler for TextInputManagerV1Handler {}
 
@@ -47,15 +60,10 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     ) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            // Track the host serial so commit_state can forward it back.
-            // Needed by ChromeOS/Exo to validate the commit sequence.
-            let commit_serial = if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-                state.host_serial = serial;
-                state.current_preedit = text.clone();
-                state.commit_serial
-            } else {
-                0
-            };
+            let commit_serial = with_state(ctx, guest_id, |s| {
+                s.host_serial = serial;
+                s.current_preedit = text.clone();
+            });
 
             // v3 preedit_string (opcode 2): cursor_end = text.len() selects entire preedit.
             let mut builder = MessageBuilder::new();
@@ -75,13 +83,10 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_commit_string(&mut self, ctx: &mut Context, serial: u32, text: &String) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            let commit_serial = if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-                state.host_serial = serial;
-                state.current_preedit.clear();
-                state.commit_serial
-            } else {
-                0
-            };
+            let commit_serial = with_state(ctx, guest_id, |s| {
+                s.host_serial = serial;
+                s.current_preedit.clear();
+            });
 
             // Explicitly clear preedit before commit (v3 preedit_string "").
             // Without this, the guest may keep stale underline after commit.
@@ -211,11 +216,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_delete_surrounding_text(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            let commit_serial = if let Some(state) = ctx.text_inputs.get(&guest_id) {
-                state.commit_serial
-            } else {
-                0
-            };
+            let commit_serial = ctx.text_inputs.get(&guest_id).map_or(0, |s| s.commit_serial);
 
             // Convert v1's (index, length) to v3's (before_length, after_length).
             // v1: delete `length` bytes starting at cursor + index.
