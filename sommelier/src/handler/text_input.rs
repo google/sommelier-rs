@@ -478,9 +478,15 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
 
             if !preedit_text.is_empty() {
                 log::info!(
-                    "  -> commit_string({:?}) + done({})",
+                    "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
                     preedit_text, done_serial
                 );
+                let mut builder = MessageBuilder::new();
+                builder.write_string("");
+                builder.write_i32(0);
+                builder.write_i32(0);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+
                 let mut builder = MessageBuilder::new();
                 builder.write_string(&preedit_text);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
@@ -1019,19 +1025,22 @@ mod tests {
         let action = handler.on_confirm_preedit(&mut ctx, 0);
         assert_eq!(action, Action::Drop);
 
-        // Should produce 2 messages: commit_string, done
-        assert_eq!(ctx.host_to_client_queue.len(), 2);
+        // Should produce 3 messages: preedit_string(""), commit_string, done
+        assert_eq!(ctx.host_to_client_queue.len(), 3);
+
+        // 0. preedit_string("") (opcode 2)
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 2);
 
         // 1. commit_string (opcode 3)
-        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 3);
-        let payload = &ctx.host_to_client_queue[0].0[8..];
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 3);
+        let payload = &ctx.host_to_client_queue[1].0[8..];
         let str_len = u32::from_ne_bytes(payload[0..4].try_into().unwrap()) as usize;
         let commit_str = String::from_utf8(payload[4..4 + str_len - 1].to_vec()).unwrap();
         assert_eq!(commit_str, "나");
 
         // 2. done (opcode 5)
-        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 5);
-        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 1), 42); // serial
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 2), 5);
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 2), 42); // serial
 
         // Cached preedit should be cleared
         if let Some(state) = ctx.text_inputs.get(&guest_id) {
