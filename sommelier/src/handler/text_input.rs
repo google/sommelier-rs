@@ -64,6 +64,10 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
             let done_serial = with_state(ctx, guest_id, |s| {
                 s.host_serial = serial;
+                // Preedit going from non-empty to empty → cleared by backspace
+                if !s.current_preedit.is_empty() && text.is_empty() {
+                    s.preedit_cleared_for_backspace = true;
+                }
                 s.current_preedit = text.clone();
             });
 
@@ -100,6 +104,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             let done_serial = with_state(ctx, guest_id, |s| {
                 s.host_serial = serial;
                 s.current_preedit.clear();
+                s.preedit_cleared_for_backspace = false;
                 for c in text.chars() {
                     s.committed_char_sizes.push(c.len_utf8() as u8);
                 }
@@ -472,23 +477,39 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(done_serial);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-            } else if let Some(byte_size) = state.committed_char_sizes.pop() {
-                // Use tracked character size for the correct delete byte count.
-                log::info!(
-                    "  -> empty preedit, sending delete_surrounding_text(before={}, after=0) + done({})",
-                    byte_size, done_serial
-                );
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(byte_size as u32);
-                builder.write_u32(0);
-                push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
+            } else if state.preedit_cleared_for_backspace {
+                state.preedit_cleared_for_backspace = false;
+                let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
+                if let Some(&keyboard_id) = keyboards.first() {
+                    const KEY_BACKSPACE: u32 = 14;
+                    log::info!(
+                        "  -> empty preedit after backspace clear, synthesizing wl_keyboard.key({}) press+release, done({})",
+                        KEY_BACKSPACE, done_serial
+                    );
+
+                    let mut builder = MessageBuilder::new();
+                    builder.write_u32(0);
+                    builder.write_u32(0);
+                    builder.write_u32(KEY_BACKSPACE);
+                    builder.write_u32(1);
+                    push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
+
+                    let mut builder = MessageBuilder::new();
+                    builder.write_u32(0);
+                    builder.write_u32(0);
+                    builder.write_u32(KEY_BACKSPACE);
+                    builder.write_u32(0);
+                    push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
+                } else {
+                    log::warn!("  -> no wl_keyboard found for backspace synthesis");
+                }
 
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(done_serial);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
             } else {
                 log::info!(
-                    "  -> empty preedit, no tracked character sizes, sending just done({})",
+                    "  -> empty preedit (no backspace context), sending just done({})",
                     done_serial
                 );
                 let mut builder = MessageBuilder::new();
@@ -554,6 +575,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 text_change_cause: 0,
                 current_preedit: String::new(),
                 committed_char_sizes: Vec::new(),
+                preedit_cleared_for_backspace: false,
                 done_serial: 1,
                 host_serial: 0,
                 host_activated: false,
@@ -806,6 +828,7 @@ mod tests {
                 text_change_cause: 0,
                 current_preedit: String::new(),
                 committed_char_sizes: Vec::new(),
+                preedit_cleared_for_backspace: false,
                 done_serial: 1,
                 host_serial: 0,
                 host_activated: false,
