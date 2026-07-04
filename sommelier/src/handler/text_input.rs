@@ -458,9 +458,29 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
             state.current_preedit.clear();
 
             if !preedit_text.is_empty() {
+                log::info!(
+                    "  -> commit_string({:?}) + done({})",
+                    preedit_text, done_serial
+                );
                 let mut builder = MessageBuilder::new();
                 builder.write_string(&preedit_text);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
+
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(done_serial);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
+            } else {
+                // When confirm_preedit fires with empty cached preedit (e.g., holding
+                // backspace after clearing composition), the IME is asking us to delete
+                // one character before cursor. Forward as delete_surrounding_text.
+                log::info!(
+                    "  -> empty preedit, sending delete_surrounding_text(before=1, after=0) + done({})",
+                    done_serial
+                );
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(1); // before_length
+                builder.write_u32(0); // after_length
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
 
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(done_serial);
