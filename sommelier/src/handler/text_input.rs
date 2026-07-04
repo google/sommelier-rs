@@ -97,7 +97,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         // v3 done (opcode 5): signals the guest that the preedit update is complete.
         log::debug!("  -> sending v3 preedit_string({:?}) + done({})", text, done_serial);
         let mut builder = MessageBuilder::new();
-        builder.write_u32(done_serial);
+        builder.write_u32(done_serial); // serial
         push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
@@ -134,7 +134,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
         // v3 done (opcode 5).
         let mut builder = MessageBuilder::new();
-        builder.write_u32(done_serial);
+        builder.write_u32(done_serial); // serial
         push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
@@ -300,7 +300,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
 
         let mut builder = MessageBuilder::new();
-        builder.write_u32(done_serial);
+        builder.write_u32(done_serial); // serial
         push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
@@ -413,7 +413,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
         let mut builder = MessageBuilder::new();
-        builder.write_u32(done_serial);
+        builder.write_u32(done_serial); // serial
         push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
 
         Action::Drop
@@ -484,10 +484,10 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         state.current_preedit.clear();
 
         if !preedit_text.is_empty() {
-        log::debug!(
-            "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
-            preedit_text, done_serial
-        );
+            log::debug!(
+                "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
+                preedit_text, done_serial
+            );
             let mut builder = MessageBuilder::new();
             builder.write_string("");
             builder.write_i32(0); // cursor_begin
@@ -532,7 +532,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         }
 
         let mut builder = MessageBuilder::new();
-        builder.write_u32(done_serial);
+        builder.write_u32(done_serial); // serial
         push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
