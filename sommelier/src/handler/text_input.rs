@@ -619,6 +619,7 @@ pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
                 state.host_v1_id,
                 host_surface,
             );
+            // activate: opcode 0
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_seat);
             builder.write_u32(host_surface);
@@ -629,6 +630,7 @@ pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
                 guest_id,
                 state.host_v1_id
             );
+            // deactivate: opcode 1
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_seat);
             push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 1, builder);
@@ -739,6 +741,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                     "  -> sending v1 set_surrounding_text({:?}, cursor={}, anchor={})",
                     text, cursor, anchor
                 );
+                // set_surrounding_text: opcode 5
                 let mut builder = MessageBuilder::new();
                 builder.write_string(text);
                 builder.write_u32(*cursor as u32);
@@ -753,26 +756,31 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             state.content_hint = 0;
             state.content_purpose = 0;
 
+            // set_content_type: opcode 6 (on zwp_text_input_v1)
             let mut builder = MessageBuilder::new();
             builder.write_u32(hint);
             builder.write_u32(purpose);
             push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 6, builder);
 
+            // map to zcr_extended_text_input_v1::set_input_type
+            // 0: normal->text(1), 1: alpha->text(1), 2: digits->number(2), 3: number->number(2),
+            // 4: phone->telephone(3), 5: url->url(4), 6: email->email(5), 7: name->text(1), 8: password->password(6)
             let input_type = match purpose {
-                0 | 1 | 7 => 1,
-                2 | 3 => 2,
-                4 => 3,
-                5 => 4,
-                6 => 5,
-                8 => 6,
-                _ => 1,
+                0 | 1 | 7 => 1, // TEXT
+                2 | 3 => 2,     // NUMBER
+                4 => 3,         // TELEPHONE
+                5 => 4,         // URL
+                6 => 5,         // EMAIL
+                8 => 6,         // PASSWORD
+                // terminal (9)
+                _ => 1, // TEXT
             };
             let mut builder = MessageBuilder::new();
             builder.write_u32(input_type);
-            builder.write_u32(0);
-            builder.write_u32(0);
-            builder.write_u32(0);
-            builder.write_u32(0);
+            builder.write_u32(0); // input_mode (default)
+            builder.write_u32(0); // input_flags
+            builder.write_u32(0); // learning_mode
+            builder.write_u32(0); // inline_composition_support
             push_msg(&mut ctx.client_to_host_queue, state.host_ext_id, 6, builder);
         }
 
@@ -781,6 +789,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 "  -> sending v1 set_cursor_rectangle({}, {}, {}, {})",
                 x, y, w, h
             );
+            // set_cursor_rectangle: opcode 7
             let mut builder = MessageBuilder::new();
             builder.write_i32(x);
             builder.write_i32(y);
@@ -793,6 +802,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             "  -> sending v1 commit_state(serial={})",
             state.host_serial
         );
+        // commit_state: opcode 9
         let mut builder = MessageBuilder::new();
         builder.write_u32(state.host_serial);
         push_msg(&mut ctx.client_to_host_queue, state.host_v1_id, 9, builder);
