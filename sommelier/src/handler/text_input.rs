@@ -24,7 +24,12 @@ use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
 use std::os::unix::io::RawFd;
 
-fn push_msg(queue: &mut Vec<(Vec<u8>, Vec<RawFd>)>, sender_id: u32, opcode: u16, builder: MessageBuilder) {
+fn push_msg(
+    queue: &mut Vec<(Vec<u8>, Vec<RawFd>)>,
+    sender_id: u32,
+    opcode: u16,
+    builder: MessageBuilder,
+) {
     queue.push((builder.build_message(sender_id, opcode), Vec::new()));
 }
 
@@ -126,7 +131,13 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             if cache.is_none() {
                 let xkb_ctx = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
                 if let Some(km) = xkbcommon::xkb::Keymap::new_from_names(
-                    &xkb_ctx, "", "", "", "", None, xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+                    &xkb_ctx,
+                    "",
+                    "",
+                    "",
+                    "",
+                    None,
+                    xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
                 ) {
                     *cache = Some((xkb_ctx, km));
                 }
@@ -197,12 +208,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         Action::Drop
     }
 
-    fn on_delete_surrounding_text(
-        &mut self,
-        ctx: &mut Context,
-        index: i32,
-        length: u32,
-    ) -> Action {
+    fn on_delete_surrounding_text(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_id = ctx.last_sender_id;
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
             let commit_serial = if let Some(state) = ctx.text_inputs.get(&guest_id) {
@@ -281,7 +287,11 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     fn on_set_preedit_region(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
 
-        if let Some((&guest_id, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_ext_id == host_ext_id) {
+        if let Some((&guest_id, state)) = ctx
+            .text_inputs
+            .iter_mut()
+            .find(|(_, s)| s.host_ext_id == host_ext_id)
+        {
             let commit_serial = state.commit_serial;
             if let Some((text, cursor, _anchor)) = state.surrounding_text.as_ref() {
                 let cursor_i64 = *cursor as i64;
@@ -294,7 +304,8 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                     && text.is_char_boundary(start_idx as usize)
                     && text.is_char_boundary((start_idx + length_i64) as usize)
                 {
-                    let preedit_text = text[start_idx as usize..(start_idx + length_i64) as usize].to_string();
+                    let preedit_text =
+                        text[start_idx as usize..(start_idx + length_i64) as usize].to_string();
                     let before_length = if start_idx < cursor_i64 {
                         (cursor_i64 - start_idx) as u32
                     } else {
@@ -359,7 +370,11 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     }
     fn on_confirm_preedit(&mut self, ctx: &mut Context, _selection_behavior: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
-        if let Some((&guest_id, state)) = ctx.text_inputs.iter_mut().find(|(_, s)| s.host_ext_id == host_ext_id) {
+        if let Some((&guest_id, state)) = ctx
+            .text_inputs
+            .iter_mut()
+            .find(|(_, s)| s.host_ext_id == host_ext_id)
+        {
             let preedit_text = state.current_preedit.clone();
             let commit_serial = state.commit_serial;
             state.current_preedit.clear();
@@ -394,7 +409,12 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_ext_id);
             builder.write_u32(host_v1_id);
-            push_msg(&mut ctx.client_to_host_queue, host_ext_manager_id, 0, builder);
+            push_msg(
+                &mut ctx.client_to_host_queue,
+                host_ext_manager_id,
+                0,
+                builder,
+            );
         }
 
         ctx.shadow_table.map_id(id, host_v1_id);
@@ -611,8 +631,8 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
     use crate::protocols::text_input_extension_unstable_v1::zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler;
+    use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
     use crate::protocols::text_input_unstable_v3::zwp_text_input_v3::ZwpTextInputV3Handler;
 
     /// Helper: extract opcode from a wire message at the given index in a queue.
@@ -895,7 +915,8 @@ mod tests {
         // Register a guest wl_keyboard ID to capture the forwarded key
         let guest_keyboard_id = 999u32;
         ctx.shadow_table.map_id(guest_keyboard_id, 888);
-        ctx.shadow_table.track_interface(guest_keyboard_id, "wl_keyboard".to_string());
+        ctx.shadow_table
+            .track_interface(guest_keyboard_id, "wl_keyboard".to_string());
 
         let mut handler = TextInputV1Handler;
         // 0xff08 is KEY_BackSpace
@@ -945,7 +966,10 @@ mod tests {
                 found_activate = true;
             }
         }
-        assert!(!found_activate, "Should not send activate when active_surface is None");
+        assert!(
+            !found_activate,
+            "Should not send activate when active_surface is None"
+        );
 
         // 2. Keyboard enter is received from host. Set active_surface to a mock guest surface ID (1234).
         let guest_surface = 1234u32;
@@ -989,7 +1013,10 @@ mod tests {
                 found_deactivate = true;
             }
         }
-        assert!(found_deactivate, "Should send deactivate when focus is lost");
+        assert!(
+            found_deactivate,
+            "Should send deactivate when focus is lost"
+        );
     }
 
     #[test]
@@ -1000,7 +1027,8 @@ mod tests {
         // Register a guest wl_keyboard ID to capture the forwarded key
         let guest_keyboard_id = 999u32;
         ctx.shadow_table.map_id(guest_keyboard_id, 888);
-        ctx.shadow_table.track_interface(guest_keyboard_id, "wl_keyboard".to_string());
+        ctx.shadow_table
+            .track_interface(guest_keyboard_id, "wl_keyboard".to_string());
 
         let mut v1_handler = TextInputV1Handler;
         let mut v3_handler = TextInputV3Handler;
@@ -1029,13 +1057,20 @@ mod tests {
 
         // 3. User holds Backspace. We simulate multiple backspace repeat events.
         let mut text = "가나다라".to_string();
-        
+
         for expected_len in (0..4).rev() {
             ctx.last_sender_id = host_v1_id;
             ctx.host_to_client_queue.clear();
 
             // 0xff08 is KEY_BackSpace. Simulate key press (state=1)
-            v1_handler.on_keysym(&mut ctx, 100 + expected_len, 200 + expected_len, 0xff08, 1, 0);
+            v1_handler.on_keysym(
+                &mut ctx,
+                100 + expected_len,
+                200 + expected_len,
+                0xff08,
+                1,
+                0,
+            );
 
             // Verify a synthetic backspace pressed key event is forwarded
             assert_eq!(ctx.host_to_client_queue.len(), 1);
@@ -1048,13 +1083,21 @@ mod tests {
 
             // Client sets surrounding text and commits
             ctx.last_sender_id = guest_id;
-            v3_handler.on_set_surrounding_text(&mut ctx, &text, text.len() as i32, text.len() as i32);
+            v3_handler.on_set_surrounding_text(
+                &mut ctx,
+                &text,
+                text.len() as i32,
+                text.len() as i32,
+            );
             v3_handler.on_commit(&mut ctx);
 
             // Verify the surrounding text updated in state
             if let Some(state) = ctx.text_inputs.get(&guest_id) {
                 assert_eq!(state.surrounding_text.as_ref().unwrap().0, text);
-                assert_eq!(state.surrounding_text.as_ref().unwrap().1, text.len() as i32);
+                assert_eq!(
+                    state.surrounding_text.as_ref().unwrap().1,
+                    text.len() as i32
+                );
             }
         }
 
@@ -1066,5 +1109,3 @@ mod tests {
         }
     }
 }
-
-
