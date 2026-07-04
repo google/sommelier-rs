@@ -100,6 +100,9 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             let done_serial = with_state(ctx, guest_id, |s| {
                 s.host_serial = serial;
                 s.current_preedit.clear();
+                for c in text.chars() {
+                    s.committed_char_sizes.push(c.len_utf8() as u8);
+                }
             });
 
             log::info!(
@@ -469,19 +472,25 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(done_serial);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-            } else {
-                // When confirm_preedit fires with empty cached preedit (e.g., holding
-                // backspace after clearing composition), the IME is asking us to delete
-                // one character before cursor. Forward as delete_surrounding_text.
+            } else if let Some(byte_size) = state.committed_char_sizes.pop() {
+                // Use tracked character size for the correct delete byte count.
                 log::info!(
-                    "  -> empty preedit, sending delete_surrounding_text(before=1, after=0) + done({})",
-                    done_serial
+                    "  -> empty preedit, sending delete_surrounding_text(before={}, after=0) + done({})",
+                    byte_size, done_serial
                 );
                 let mut builder = MessageBuilder::new();
-                builder.write_u32(1); // before_length
-                builder.write_u32(0); // after_length
+                builder.write_u32(byte_size as u32);
+                builder.write_u32(0);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
 
+                let mut builder = MessageBuilder::new();
+                builder.write_u32(done_serial);
+                push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
+            } else {
+                log::info!(
+                    "  -> empty preedit, no tracked character sizes, sending just done({})",
+                    done_serial
+                );
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(done_serial);
                 push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
@@ -544,6 +553,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
+                committed_char_sizes: Vec::new(),
                 done_serial: 1,
                 host_serial: 0,
                 host_activated: false,
@@ -627,6 +637,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.surrounding_text = Some((text.clone(), cursor, anchor));
             state.surrounding_text_dirty = true;
+            state.committed_char_sizes.clear();
         }
         Action::Drop
     }
@@ -794,6 +805,7 @@ mod tests {
                 cursor_rect: None,
                 text_change_cause: 0,
                 current_preedit: String::new(),
+                committed_char_sizes: Vec::new(),
                 done_serial: 1,
                 host_serial: 0,
                 host_activated: false,

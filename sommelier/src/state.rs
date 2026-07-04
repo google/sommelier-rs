@@ -316,6 +316,10 @@ pub struct TextInputState {
     pub cursor_rect: Option<(i32, i32, i32, i32)>,
     pub text_change_cause: u32,
     pub current_preedit: String,
+    /// Stack of UTF-8 byte lengths for characters committed via commit_string.
+    /// Used by confirm_preedit to send correct before_length for backspace deletion.
+    /// Cleared when the guest sends set_surrounding_text.
+    pub committed_char_sizes: Vec<u8>,
     pub done_serial: u32,
     pub host_serial: u32,
     pub host_activated: bool,
