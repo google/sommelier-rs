@@ -309,12 +309,16 @@ pub struct TextInputState {
     pub guest_seat: u32,
     pub active_surface: Option<u32>,
     pub enabled: bool,
-    pub enabled_changed: bool,
     pub surrounding_text: Option<(String, i32, i32)>,
+    pub surrounding_text_dirty: bool,
     pub content_hint: u32,
     pub content_purpose: u32,
     pub cursor_rect: Option<(i32, i32, i32, i32)>,
     pub text_change_cause: u32,
+    pub current_preedit: String,
+    pub done_serial: u32,
+    pub host_serial: u32,
+    pub host_activated: bool,
 }
 
 pub struct Context {

@@ -26,7 +26,6 @@ limitations under the License.
 //!
 //! See `docs/KEYBOARD_SHORTCUT_INHIBITION.md` for the full protocol flow.
 
-use crate::handler::text_input::push_msg;
 use crate::protocols::wayland::wl_keyboard;
 use crate::state::{Context, GuestId, HostId};
 use crate::wire::{Action, MessageBuilder};
@@ -399,6 +398,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         log::info!("  -> seat_id={}: setting active_surface={}", guest_seat_id, guest_surface_id);
         ctx.active_surface_for_seat.insert(guest_seat_id, guest_surface_id);
 
+        let mut text_inputs_to_update = Vec::new();
         // Find the v3 text input for this seat.
         for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
             if state.guest_seat == guest_seat_id {
@@ -411,8 +411,14 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 // Send zwp_text_input_v3.enter (opcode 0).
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(guest_surface_id);
-                push_msg(&mut ctx.host_to_client_queue, *guest_text_input_id, 0, builder);
+                let msg = builder.build_message(*guest_text_input_id, 0);
+                ctx.host_to_client_queue.push((msg, Vec::new()));
+                text_inputs_to_update.push(*guest_text_input_id);
             }
+        }
+
+        for id in text_inputs_to_update {
+            crate::handler::text_input::update_host_activation(ctx, id);
         }
 
         Action::Forward
@@ -439,6 +445,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         log::info!("  -> seat_id={}: removing active_surface", guest_seat_id);
         ctx.active_surface_for_seat.remove(&guest_seat_id);
 
+        let mut text_inputs_to_update = Vec::new();
         // Find the v3 text input for this seat.
         for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
             if state.guest_seat == guest_seat_id {
@@ -451,8 +458,14 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 // Send zwp_text_input_v3.leave (opcode 1).
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(guest_surface_id);
-                push_msg(&mut ctx.host_to_client_queue, *guest_text_input_id, 1, builder);
+                let msg = builder.build_message(*guest_text_input_id, 1);
+                ctx.host_to_client_queue.push((msg, Vec::new()));
+                text_inputs_to_update.push(*guest_text_input_id);
             }
+        }
+
+        for id in text_inputs_to_update {
+            crate::handler::text_input::update_host_activation(ctx, id);
         }
 
         Action::Forward
@@ -475,6 +488,7 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             ">>> wl_keyboard.on_key: host_kb={:?}, guest_kb={}, serial={}, key={}, state={}",
             host_keyboard_id, guest_keyboard_id, serial, key, state
         );
+
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 
