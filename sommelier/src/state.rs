@@ -315,6 +315,8 @@ pub struct TextInputState {
     pub content_purpose: u32,
     pub cursor_rect: Option<(i32, i32, i32, i32)>,
     pub text_change_cause: u32,
+    pub current_preedit: String,
+    pub done_serial: u32,
 }
 
 pub struct Context {
