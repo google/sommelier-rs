@@ -126,8 +126,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_keysym(
         &mut self,
         ctx: &mut Context,
-        serial: u32,
-        time: u32,
+        _serial: u32,
+        _time: u32,
         sym: u32,
         state: u32,
         _modifiers: u32,
@@ -135,54 +135,59 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         let host_id = ctx.last_sender_id;
         let sym_char = std::char::from_u32(sym).map(|c| c.to_string()).unwrap_or_default();
         log::trace!(
-            ">>> on_keysym: host_id={}, serial={}, sym=0x{:x} ({:?}), state={}",
-            host_id, serial, sym, sym_char, state
+            ">>> on_keysym: host_id={}, sym=0x{:x} ({:?}), state={}",
+            host_id,
+            sym,
+            sym_char,
+            state
         );
 
         let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
-        let found_keycode =
-            xkbcommon::xkb::Keymap::new_from_names(
-                &context,
-                "",
-                "",
-                "",
-                "",
-                None,
-                xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
-            )
-            .and_then(|keymap| {
-                for keycode_raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
-                    let keycode = keycode_raw.into();
-                    let syms = keymap.key_get_syms_by_level(keycode, 0, 0);
-                    if syms.iter().any(|s| s.raw() == sym) {
-                        return Some(keycode_raw - 8);
-                    }
+        if let Some(keymap) = xkbcommon::xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "",
+            "",
+            None,
+            xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+        ) {
+            let mut found_keycode = None;
+            for keycode_raw in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
+                let keycode = keycode_raw.into();
+                let syms = keymap.key_get_syms_by_level(keycode, 0, 0);
+                if syms.iter().any(|s| s.raw() == sym) {
+                    found_keycode = Some(keycode_raw - 8);
+                    break;
                 }
-                None
-            });
-
-        if let Some(keycode) = found_keycode {
-            let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
-            if let Some(&keyboard_id) = keyboards.first() {
-                log::debug!(
-                    "  -> forwarding wl_keyboard.key: keyboard_id={}, serial={}, time={}, keycode={}, state={}",
-                    keyboard_id, serial, time, keycode, state
-                );
-                // Send wl_keyboard::key (opcode 3).
-                let mut builder = MessageBuilder::new();
-                builder.write_u32(serial); // serial
-                builder.write_u32(time);   // time
-                builder.write_u32(keycode); // key
-                builder.write_u32(state);  // state (0: released, 1: pressed)
-                push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
-            } else {
-                log::warn!("  -> no wl_keyboard found to forward keysym to");
             }
-        } else {
-            log::warn!(
-                "  -> could not find keycode for sym=0x{:x} ({:?})",
-                sym, sym_char
-            );
+
+            if let Some(keycode) = found_keycode {
+                let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
+                if let Some(&keyboard_id) = keyboards.first() {
+                    log::debug!(
+                        "  -> forwarding wl_keyboard.key: keyboard_id={}, keycode={}, state={}",
+                        keyboard_id,
+                        keycode,
+                        state
+                    );
+                    // Send wl_keyboard::key (opcode 3)
+                    let mut builder = MessageBuilder::new();
+                    builder.write_u32(0); // serial
+                    builder.write_u32(0); // time
+                    builder.write_u32(keycode); // key
+                    builder.write_u32(state); // state (0: released, 1: pressed)
+                    push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
+                } else {
+                    log::warn!("  -> no wl_keyboard found to forward keysym to");
+                }
+            } else {
+                log::warn!(
+                    "  -> could not find keycode for sym=0x{:x} ({:?})",
+                    sym,
+                    sym_char
+                );
+            }
         }
         Action::Drop
     }
