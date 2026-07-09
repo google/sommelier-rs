@@ -85,12 +85,6 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             serial, text, commit, guest_id, done_serial
         );
 
-        // TODO: Korean IME drops intermediate syllables in continuous input
-        // (e.g., "가나다라마바사" → "가다마사"). The v1 `commit` parameter changes with
-        // every keystroke, but same-syllable composition and syllable transition are
-        // indistinguishable at the protocol level. v3 has no `commit` parameter or
-        // implicit commit mechanism, so these events are lost in translation.
-
         // v3 preedit_string (opcode 2).
         let mut builder = MessageBuilder::new();
         builder.write_string(text);
