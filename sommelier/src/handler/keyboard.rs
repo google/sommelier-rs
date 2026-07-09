@@ -488,7 +488,6 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             ">>> wl_keyboard.on_key: host_kb={:?}, guest_kb={}, serial={}, key={}, state={}",
             host_keyboard_id, guest_keyboard_id, serial, key, state
         );
-
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
 

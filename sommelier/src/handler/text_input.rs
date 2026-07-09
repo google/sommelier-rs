@@ -236,7 +236,9 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     ) -> Action {
         log::trace!(
             ">>> on_preedit_styling: index={}, length={}, style={}",
-            _index, _length, _style
+            _index,
+            _length,
+            _style
         );
         Action::Drop
     }
@@ -401,7 +403,8 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     fn on_clear_grammar_fragments(&mut self, _ctx: &mut Context, _start: u32, _end: u32) -> Action {
         log::trace!(
             ">>> on_clear_grammar_fragments: start={}, end={}",
-            _start, _end
+            _start,
+            _end
         );
         Action::Drop
     }
@@ -414,14 +417,17 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     ) -> Action {
         log::trace!(
             ">>> on_add_grammar_fragment: start={}, end={}, suggestion={:?}",
-            _start, _end, _suggestion
+            _start,
+            _end,
+            _suggestion
         );
         Action::Drop
     }
     fn on_set_autocorrect_range(&mut self, _ctx: &mut Context, _start: u32, _end: u32) -> Action {
         log::trace!(
             ">>> on_set_autocorrect_range: start={}, end={}",
-            _start, _end
+            _start,
+            _end
         );
         Action::Drop
     }
@@ -435,7 +441,10 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
     ) -> Action {
         log::trace!(
             ">>> on_set_virtual_keyboard_occluded_bounds: x={}, y={}, w={}, h={}",
-            _x, _y, _width, _height
+            _x,
+            _y,
+            _width,
+            _height
         );
         Action::Drop
     }
@@ -494,10 +503,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
 pub struct TextInputManagerV3Handler;
 impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManagerV3Handler {
     fn on_get_text_input(&mut self, ctx: &mut Context, id: u32, seat: u32) -> Action {
-        log::trace!(
-            ">>> v3 on_get_text_input: guest_id={}, seat={}",
-            id, seat
-        );
+        log::trace!(">>> v3 on_get_text_input: guest_id={}, seat={}", id, seat);
         let host_v1_id = ctx.shadow_table.allocate_host_id();
         let host_ext_id = ctx.shadow_table.allocate_host_id();
 
@@ -511,12 +517,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_ext_id);
             builder.write_u32(host_v1_id);
-            push_msg(
-                &mut ctx.client_to_host_queue,
-                host_ext_manager_id,
-                0,
-                builder,
-            );
+            push_msg(&mut ctx.client_to_host_queue, host_ext_manager_id, 0, builder);
         }
 
         ctx.shadow_table.map_id(id, host_v1_id);
@@ -637,7 +638,8 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         let guest_id = ctx.last_sender_id;
         log::trace!(
             ">>> v3 on_text_change_cause: guest_id={}, cause={}",
-            guest_id, cause
+            guest_id,
+            cause
         );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.text_change_cause = cause;
@@ -649,7 +651,9 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         let guest_id = ctx.last_sender_id;
         log::trace!(
             ">>> v3 on_set_content_type: guest_id={}, hint={}, purpose={}",
-            guest_id, hint, purpose
+            guest_id,
+            hint,
+            purpose
         );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.content_hint = hint;
@@ -669,7 +673,11 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         let guest_id = ctx.last_sender_id;
         log::trace!(
             ">>> v3 on_set_cursor_rectangle: guest_id={}, rect=({}, {}, {}, {})",
-            guest_id, x, y, width, height
+            guest_id,
+            x,
+            y,
+            width,
+            height
         );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.cursor_rect = Some((x, y, width, height));
