@@ -24,6 +24,9 @@ use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
 use std::os::unix::io::RawFd;
 
+/// Push a wire message built by `builder` onto `queue`, binding it to
+/// `sender_id` / `opcode`. Centralizes the (header + payload) assembly that
+/// used to be open-coded with `extend_from_slice` + `(len << 16) | opcode`.
 fn push_msg(
     queue: &mut Vec<(Vec<u8>, Vec<RawFd>)>,
     sender_id: u32,
@@ -555,6 +558,9 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
     }
 }
 
+/// Tracks the host-side activation state of a text input v1 object, sending
+/// `activate` / `deactivate` requests only when the state actually transitions.
+/// Called when the guest's enabled state or focused surface changes.
 pub(crate) fn update_host_activation(ctx: &mut Context, guest_id: u32) {
     if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
         let host_seat = ctx.shadow_table.get_host_id(state.guest_seat).unwrap_or(0);
