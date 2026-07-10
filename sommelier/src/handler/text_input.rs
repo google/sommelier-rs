@@ -209,19 +209,40 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         Action::Drop
     }
 
-    fn on_delete_surrounding_text(
-        &mut self,
-        ctx: &mut Context,
-        _index: i32,
-        _length: u32,
-    ) -> Action {
+    fn on_delete_surrounding_text(&mut self, ctx: &mut Context, index: i32, length: u32) -> Action {
         let host_id = ctx.last_sender_id;
+        let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) else {
+            return Action::Drop;
+        };
         log::trace!(
-            ">>> on_delete_surrounding_text: host_id={}, index={}, length={}",
-            host_id,
-            _index,
-            _length
+            ">>> on_delete_surrounding_text: host_id={}, guest_id={}, index={}, length={}",
+            host_id, guest_id, index, length
         );
+
+        // Convert v1's (index, length) to v3's (before_length, after_length).
+        // v1: delete `length` bytes starting at cursor + index.
+        // v3: delete `before_length` bytes before cursor, `after_length` after cursor.
+        let (before_length, after_length) = if index < 0 {
+            let start = index as i64;
+            (
+                ((-start).min(length as i64)) as u32,
+                (start + length as i64).max(0) as u32,
+            )
+        } else {
+            (0, length)
+        };
+
+        log::debug!(
+            "  -> sending v3 delete_surrounding_text(before={}, after={})",
+            before_length,
+            after_length
+        );
+
+        // v3 delete_surrounding_text (opcode 4)
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(before_length);
+        builder.write_u32(after_length);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 4, builder);
         Action::Drop
     }
 
@@ -562,5 +583,111 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         }
 
         Action::Drop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
+
+    fn msg_opcode(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u16 {
+        let word2 = u32::from_ne_bytes(queue[idx].0[4..8].try_into().unwrap());
+        (word2 & 0xffff) as u16
+    }
+
+    fn msg_sender(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u32 {
+        u32::from_ne_bytes(queue[idx].0[0..4].try_into().unwrap())
+    }
+
+    fn setup_v1_ctx() -> (Context, u32, u32) {
+        let mut ctx = Context::new_for_test(false, false, vec![]);
+        let host_v1_id = 10u32;
+        let guest_id = 20u32;
+        let host_ext_id = 30u32;
+        ctx.shadow_table.map_id(guest_id, host_v1_id);
+        ctx.text_inputs.insert(
+            guest_id,
+            crate::state::TextInputState {
+                host_v1_id,
+                host_ext_id,
+                guest_seat: 0,
+                active_surface: None,
+                enabled: false,
+                enabled_changed: false,
+                surrounding_text: None,
+                content_hint: 0,
+                content_purpose: 0,
+                cursor_rect: None,
+                text_change_cause: 0,
+            },
+        );
+        (ctx, host_v1_id, guest_id)
+    }
+
+    #[test]
+    fn delete_surrounding_negative_index_spanning_cursor() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        let mut handler = TextInputV1Handler;
+        let action = handler.on_delete_surrounding_text(&mut ctx, -3, 5);
+        assert_eq!(action, Action::Drop);
+
+        assert_eq!(ctx.host_to_client_queue.len(), 1);
+        assert_eq!(msg_sender(&ctx.host_to_client_queue, 0), guest_id);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 4);
+
+        let payload = &ctx.host_to_client_queue[0].0[8..];
+        let before_length = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+        let after_length = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+        assert_eq!(before_length, 3);
+        assert_eq!(after_length, 2);
+    }
+
+    #[test]
+    fn delete_surrounding_entirely_before_cursor() {
+        let (mut ctx, host_v1_id, _guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        let mut handler = TextInputV1Handler;
+        let action = handler.on_delete_surrounding_text(&mut ctx, -5, 3);
+        assert_eq!(action, Action::Drop);
+
+        assert_eq!(ctx.host_to_client_queue.len(), 1);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 4);
+
+        let payload = &ctx.host_to_client_queue[0].0[8..];
+        let before_length = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+        let after_length = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+        assert_eq!(before_length, 3);
+        assert_eq!(after_length, 0);
+    }
+
+    #[test]
+    fn delete_surrounding_positive_index() {
+        let (mut ctx, host_v1_id, _guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        let mut handler = TextInputV1Handler;
+        let action = handler.on_delete_surrounding_text(&mut ctx, 2, 3);
+        assert_eq!(action, Action::Drop);
+
+        assert_eq!(ctx.host_to_client_queue.len(), 1);
+        let payload = &ctx.host_to_client_queue[0].0[8..];
+        let before_length = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+        let after_length = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+        assert_eq!(before_length, 0);
+        assert_eq!(after_length, 3);
+    }
+
+    #[test]
+    fn delete_surrounding_returns_drop_for_unknown_host() {
+        let (mut ctx, _host_v1_id, _guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = 99999; // unknown host ID
+        let mut handler = TextInputV1Handler;
+        let action = handler.on_delete_surrounding_text(&mut ctx, -1, 1);
+        assert_eq!(action, Action::Drop);
+        assert_eq!(ctx.host_to_client_queue.len(), 0);
     }
 }
