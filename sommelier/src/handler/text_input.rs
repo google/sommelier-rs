@@ -36,6 +36,24 @@ pub(crate) fn push_msg(
     queue.push((builder.build_message(sender_id, opcode), Vec::new()));
 }
 
+/// Get or create a `TextInputState` for `guest_id`, run `f` for side effects,
+/// and return a monotonically increasing serial for the v3 `done` event.
+/// Returns `0` if no state exists for `guest_id`.
+fn with_state<F>(ctx: &mut Context, guest_id: u32, f: F) -> u32
+where
+    F: FnOnce(&mut crate::state::TextInputState),
+{
+    match ctx.text_inputs.get_mut(&guest_id) {
+        Some(state) => {
+            f(state);
+            let serial = state.done_serial;
+            state.done_serial = state.done_serial.wrapping_add(1).max(1);
+            serial
+        }
+        None => 0,
+    }
+}
+
 pub struct TextInputManagerV1Handler;
 impl zwp_text_input_manager_v1::ZwpTextInputManagerV1Handler for TextInputManagerV1Handler {}
 
@@ -49,44 +67,64 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         _commit: &String,
     ) -> Action {
         let host_id = ctx.last_sender_id;
-        log::trace!(">>> on_preedit_string: host_id={}, text={:?}", host_id, text);
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            // v3 preedit_string (opcode 2)
-            let mut builder = MessageBuilder::new();
-            builder.write_string(text);
-            builder.write_i32(0); // cursor_begin
-            builder.write_i32(0); // cursor_end
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
-        }
+        let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) else {
+            return Action::Drop;
+        };
+        let done_serial = with_state(ctx, guest_id, |s| {
+            s.current_preedit = text.clone();
+        });
+
+        log::trace!(
+            ">>> on_preedit_string: host_id={}, text={:?}, guest_id={}, done_serial={}",
+            host_id, text, guest_id, done_serial
+        );
+
+        // v3 preedit_string (opcode 2) with cursor_end = text.len() so the
+        // guest underlines the full preedit text rather than an empty range.
+        let mut builder = MessageBuilder::new();
+        builder.write_string(text);
+        builder.write_i32(0); // cursor_begin
+        builder.write_i32(text.len() as i32); // cursor_end
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+
+        // v3 done (opcode 5): signals the guest to apply the preedit update.
+        // Without this the guest never processes the preedit_string.
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
 
     fn on_commit_string(&mut self, ctx: &mut Context, _serial: u32, text: &String) -> Action {
         let host_id = ctx.last_sender_id;
+        let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) else {
+            return Action::Drop;
+        };
+        let done_serial = with_state(ctx, guest_id, |s| {
+            s.current_preedit.clear();
+        });
+
         log::trace!(
-            ">>> on_commit_string: host_id={}, text={:?}",
-            host_id,
-            text
+            ">>> on_commit_string: host_id={}, text={:?}, guest_id={}, done_serial={}",
+            host_id, text, guest_id, done_serial
         );
-        if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
-            // v3 preedit_string (opcode 2) - explicitly clear preedit before commit
-            let mut builder = MessageBuilder::new();
-            builder.write_string("");
-            builder.write_i32(0); // cursor_begin
-            builder.write_i32(0); // cursor_end
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
-            // v3 commit_string (opcode 3)
-            let mut builder = MessageBuilder::new();
-            builder.write_string(text);
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
+        // v3 preedit_string (opcode 2) — explicitly clear preedit before commit
+        let mut builder = MessageBuilder::new();
+        builder.write_string("");
+        builder.write_i32(0); // cursor_begin
+        builder.write_i32(0); // cursor_end
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
 
-            // v3 done (opcode 5)
-            // serial matches state but for simplicity we can send 0 or _serial
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(0); // serial
-            push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
-        }
+        // v3 commit_string (opcode 3)
+        let mut builder = MessageBuilder::new();
+        builder.write_string(text);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
+
+        // v3 done (opcode 5) with real serial
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
         Action::Drop
     }
 
@@ -365,6 +403,8 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 enabled: false,
                 enabled_changed: false,
                 surrounding_text: None,
+                current_preedit: String::new(),
+                done_serial: 1,
                 content_hint: 0,
                 content_purpose: 0,
                 cursor_rect: None,
@@ -562,5 +602,176 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         }
 
         Action::Drop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
+
+    fn msg_opcode(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u16 {
+        let word2 = u32::from_ne_bytes(queue[idx].0[4..8].try_into().unwrap());
+        (word2 & 0xffff) as u16
+    }
+
+    fn msg_sender(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u32 {
+        u32::from_ne_bytes(queue[idx].0[0..4].try_into().unwrap())
+    }
+
+    fn msg_done_serial(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u32 {
+        let payload = &queue[idx].0[8..];
+        u32::from_ne_bytes(payload[0..4].try_into().unwrap())
+    }
+
+    fn setup_v1_ctx() -> (Context, u32, u32) {
+        let mut ctx = Context::new_for_test(false, false, vec![]);
+        let host_v1_id = 10u32;
+        let guest_id = 20u32;
+        let host_ext_id = 30u32;
+        ctx.shadow_table.map_id(guest_id, host_v1_id);
+        ctx.text_inputs.insert(
+            guest_id,
+            crate::state::TextInputState {
+                host_v1_id,
+                host_ext_id,
+                guest_seat: 0,
+                active_surface: None,
+                enabled: false,
+                enabled_changed: false,
+                surrounding_text: None,
+                current_preedit: String::new(),
+                done_serial: 1,
+                content_hint: 0,
+                content_purpose: 0,
+                cursor_rect: None,
+                text_change_cause: 0,
+            },
+        );
+        (ctx, host_v1_id, guest_id)
+    }
+
+    #[test]
+    fn on_preedit_string_sends_v3_preedit_and_done() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.done_serial = 42;
+        }
+
+        let mut handler = TextInputV1Handler;
+        let text = "hello".to_string();
+        let action = handler.on_preedit_string(&mut ctx, 0, &text, &String::new());
+        assert_eq!(action, Action::Drop);
+
+        // preedit_string (opcode 2) + done (opcode 5)
+        assert_eq!(ctx.host_to_client_queue.len(), 2);
+
+        assert_eq!(msg_sender(&ctx.host_to_client_queue, 0), guest_id);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 2);
+
+        assert_eq!(msg_sender(&ctx.host_to_client_queue, 1), guest_id);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 5);
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 1), 42);
+    }
+
+    #[test]
+    fn on_commit_string_sends_preedit_clear_then_commit_then_done() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.done_serial = 42;
+        }
+
+        let mut handler = TextInputV1Handler;
+        let text = "committed".to_string();
+        let action = handler.on_commit_string(&mut ctx, 0, &text);
+        assert_eq!(action, Action::Drop);
+
+        // preedit_string("") + commit_string + done
+        assert_eq!(ctx.host_to_client_queue.len(), 3);
+
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 2);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 3);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 2), 5);
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 2), 42);
+
+        for i in 0..3 {
+            assert_eq!(msg_sender(&ctx.host_to_client_queue, i), guest_id);
+        }
+    }
+
+    #[test]
+    fn with_state_increments_done_serial() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        // First call should return 1 (initial value)
+        let s1 = with_state(&mut ctx, guest_id, |_| {});
+        assert_eq!(s1, 1);
+
+        // Second call should return 2
+        let s2 = with_state(&mut ctx, guest_id, |_| {});
+        assert_eq!(s2, 2);
+    }
+
+    #[test]
+    fn with_state_returns_zero_for_unknown_guest() {
+        let (mut ctx, _host_v1_id, _guest_id) = setup_v1_ctx();
+        let s = with_state(&mut ctx, 999, |_| {});
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn preedit_string_fixes_cursor_end() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        let mut handler = TextInputV1Handler;
+        let text = "abc".to_string();
+        let _ = handler.on_preedit_string(&mut ctx, 0, &text, &String::new());
+
+        // Rebuild a preedit_string message with known text and verify the
+        // cursor_end bytes match text.len().
+        let mut expected = MessageBuilder::new();
+        expected.write_string(&text);
+        expected.write_i32(0);
+        expected.write_i32(3);
+        let expected_payload = &expected.build_message(0, 0)[8..];
+
+        let actual_payload = &ctx.host_to_client_queue[0].0[8..];
+        let len = expected_payload.len();
+        assert_eq!(&actual_payload[..len], expected_payload);
+    }
+
+    #[test]
+    fn preedit_string_updates_current_preedit() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        let mut handler = TextInputV1Handler;
+        let text = "hello".to_string();
+        let _ = handler.on_preedit_string(&mut ctx, 0, &text, &String::new());
+
+        let state = ctx.text_inputs.get(&guest_id).unwrap();
+        assert_eq!(state.current_preedit, "hello");
+    }
+
+    #[test]
+    fn commit_string_clears_current_preedit() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.current_preedit = "hello".to_string();
+        }
+
+        let mut handler = TextInputV1Handler;
+        let _ = handler.on_commit_string(&mut ctx, 0, &"committed".to_string());
+
+        let state = ctx.text_inputs.get(&guest_id).unwrap();
+        assert_eq!(state.current_preedit, "");
     }
 }

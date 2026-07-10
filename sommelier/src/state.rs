@@ -311,6 +311,8 @@ pub struct TextInputState {
     pub enabled: bool,
     pub enabled_changed: bool,
     pub surrounding_text: Option<(String, i32, i32)>,
+    pub current_preedit: String,
+    pub done_serial: u32,
     pub content_hint: u32,
     pub content_purpose: u32,
     pub cursor_rect: Option<(i32, i32, i32, i32)>,
