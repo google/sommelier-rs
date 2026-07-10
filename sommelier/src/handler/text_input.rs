@@ -356,9 +356,54 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         let host_ext_id = ctx.last_sender_id;
         log::trace!(
             ">>> on_confirm_preedit: host_ext_id={}, selection_behavior={}",
-            host_ext_id,
-            _selection_behavior
+            host_ext_id, _selection_behavior
         );
+
+        let Some((&guest_id, state)) = ctx
+            .text_inputs
+            .iter_mut()
+            .find(|(_, s)| s.host_ext_id == host_ext_id)
+        else {
+            return Action::Drop;
+        };
+
+        let preedit_text = state.current_preedit.clone();
+        let done_serial = {
+            let serial = state.done_serial;
+            state.done_serial = state.done_serial.wrapping_add(1).max(1);
+            serial
+        };
+        state.current_preedit.clear();
+
+        if !preedit_text.is_empty() {
+            log::debug!(
+                "  -> sending v3 preedit_string(\"\") + commit_string({:?}) + done({})",
+                preedit_text, done_serial
+            );
+
+            // v3 preedit_string("") (opcode 2) — clear preedit underline
+            let mut builder = MessageBuilder::new();
+            builder.write_string("");
+            builder.write_i32(0); // cursor_begin
+            builder.write_i32(0); // cursor_end
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 2, builder);
+
+            // v3 commit_string (opcode 3)
+            let mut builder = MessageBuilder::new();
+            builder.write_string(&preedit_text);
+            push_msg(&mut ctx.host_to_client_queue, guest_id, 3, builder);
+        } else {
+            log::debug!(
+                "  -> empty preedit, sending just done({})",
+                done_serial
+            );
+        }
+
+        // v3 done (opcode 5)
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(done_serial);
+        push_msg(&mut ctx.host_to_client_queue, guest_id, 5, builder);
+
         Action::Drop
     }
 }
@@ -608,6 +653,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocols::text_input_extension_unstable_v1::zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler;
     use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
 
     fn msg_opcode(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u16 {
@@ -773,5 +819,76 @@ mod tests {
 
         let state = ctx.text_inputs.get(&guest_id).unwrap();
         assert_eq!(state.current_preedit, "");
+    }
+
+    // ---- PR 6: confirm_preedit tests ----
+
+    #[test]
+    fn confirm_preedit_commits_cached_preedit() {
+        let (mut ctx, _host_v1_id, guest_id) = setup_v1_ctx();
+        let host_ext_id = 30u32;
+        ctx.last_sender_id = host_ext_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.host_ext_id = host_ext_id;
+            state.current_preedit = "hello".to_string();
+            state.done_serial = 42;
+        }
+
+        let mut handler = ExtendedTextInputV1Handler;
+        let action = handler.on_confirm_preedit(&mut ctx, 0);
+        assert_eq!(action, Action::Drop);
+
+        // preedit_string("") + commit_string + done
+        assert_eq!(ctx.host_to_client_queue.len(), 3);
+
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 2); // preedit_string("")
+        assert_eq!(msg_sender(&ctx.host_to_client_queue, 0), guest_id);
+
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 1), 3); // commit_string
+        let payload = &ctx.host_to_client_queue[1].0[8..];
+        let str_len = u32::from_ne_bytes(payload[0..4].try_into().unwrap()) as usize;
+        let commit_str = String::from_utf8(payload[4..4 + str_len - 1].to_vec()).unwrap();
+        assert_eq!(commit_str, "hello");
+
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 2), 5); // done
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 2), 42);
+
+        if let Some(state) = ctx.text_inputs.get(&guest_id) {
+            assert_eq!(state.current_preedit, "");
+        }
+    }
+
+    #[test]
+    fn confirm_preedit_empty_preedit_sends_only_done() {
+        let (mut ctx, _host_v1_id, guest_id) = setup_v1_ctx();
+        let host_ext_id = 30u32;
+        ctx.last_sender_id = host_ext_id;
+
+        if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
+            state.host_ext_id = host_ext_id;
+            state.current_preedit = String::new();
+            state.done_serial = 42;
+        }
+
+        let mut handler = ExtendedTextInputV1Handler;
+        let action = handler.on_confirm_preedit(&mut ctx, 0);
+        assert_eq!(action, Action::Drop);
+
+        // Only done
+        assert_eq!(ctx.host_to_client_queue.len(), 1);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 5);
+        assert_eq!(msg_done_serial(&ctx.host_to_client_queue, 0), 42);
+    }
+
+    #[test]
+    fn confirm_preedit_returns_drop_for_unknown_host_ext() {
+        let (mut ctx, _host_v1_id, _guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = 99999;
+
+        let mut handler = ExtendedTextInputV1Handler;
+        let action = handler.on_confirm_preedit(&mut ctx, 0);
+        assert_eq!(action, Action::Drop);
+        assert_eq!(ctx.host_to_client_queue.len(), 0);
     }
 }
