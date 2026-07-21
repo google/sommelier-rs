@@ -371,6 +371,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 enabled_changed: false,
                 surrounding_text: None,
                 host_serial: 0,
+                surrounding_text_dirty: false,
                 content_hint: 0,
                 content_purpose: 0,
                 cursor_rect: None,
@@ -421,6 +422,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
             state.surrounding_text = Some((text.clone(), cursor, anchor));
+            state.surrounding_text_dirty = true;
         }
         Action::Drop
     }
@@ -504,13 +506,16 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 state.enabled_changed = false;
             }
 
-            if let Some((text, cursor, anchor)) = state.surrounding_text.take() {
-                // set_surrounding_text: opcode 5
-                let mut builder = MessageBuilder::new();
-                builder.write_string(&text);
-                builder.write_u32(cursor as u32);
-                builder.write_u32(anchor as u32);
-                push_msg(&mut ctx.client_to_host_queue, host_v1_id, 5, builder);
+            if state.surrounding_text_dirty {
+                state.surrounding_text_dirty = false;
+                if let Some((text, cursor, anchor)) = &state.surrounding_text {
+                    // set_surrounding_text: opcode 5
+                    let mut builder = MessageBuilder::new();
+                    builder.write_string(text);
+                    builder.write_u32(*cursor as u32);
+                    builder.write_u32(*anchor as u32);
+                    push_msg(&mut ctx.client_to_host_queue, host_v1_id, 5, builder);
+                }
             }
 
             if state.content_hint != 0 || state.content_purpose != 0 {
@@ -575,6 +580,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
 mod tests {
     use super::*;
     use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
+    use crate::protocols::text_input_unstable_v3::zwp_text_input_v3::ZwpTextInputV3Handler;
 
     fn msg_opcode(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u16 {
         let word2 = u32::from_ne_bytes(queue[idx].0[4..8].try_into().unwrap());
@@ -602,6 +608,7 @@ mod tests {
                 enabled_changed: false,
                 surrounding_text: None,
                 host_serial: 0,
+                surrounding_text_dirty: false,
                 content_hint: 0,
                 content_purpose: 0,
                 cursor_rect: None,
@@ -659,5 +666,47 @@ mod tests {
         let (mut ctx, _host_v1_id, _guest_id) = setup_v1_ctx();
         // Unknown host ID should not panic.
         store_host_serial(&mut ctx, 99999, 42);
+    }
+
+    fn count_set_surrounding_text(msgs: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)]) -> usize {
+        msgs.iter()
+            .filter(|(msg, _)| {
+                let opcode = u32::from_ne_bytes(msg[4..8].try_into().unwrap()) & 0xffff;
+                opcode == 5
+            })
+            .count()
+    }
+
+    #[test]
+    fn surrounding_text_only_sent_when_dirty() {
+        let (mut ctx, _host_v1_id, guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = guest_id;
+
+        let mut v3_handler = TextInputV3Handler;
+        v3_handler.on_set_surrounding_text(&mut ctx, &"hello".to_string(), 5, 5);
+
+        // First commit should send set_surrounding_text
+        ctx.client_to_host_queue.clear();
+        v3_handler.on_commit(&mut ctx);
+        assert_eq!(count_set_surrounding_text(&ctx.client_to_host_queue), 1);
+
+        // Second commit WITHOUT calling on_set_surrounding_text should NOT send it
+        ctx.client_to_host_queue.clear();
+        v3_handler.on_commit(&mut ctx);
+        assert_eq!(
+            count_set_surrounding_text(&ctx.client_to_host_queue),
+            0,
+            "surrounding_text must not be re-sent when not dirty"
+        );
+
+        // Updating the text and committing should send it again
+        v3_handler.on_set_surrounding_text(&mut ctx, &"world".to_string(), 5, 5);
+        ctx.client_to_host_queue.clear();
+        v3_handler.on_commit(&mut ctx);
+        assert_eq!(
+            count_set_surrounding_text(&ctx.client_to_host_queue),
+            1,
+            "surrounding_text must be sent again after on_set_surrounding_text"
+        );
     }
 }
