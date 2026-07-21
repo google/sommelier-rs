@@ -36,6 +36,16 @@ pub(crate) fn push_msg(
     queue.push((builder.build_message(sender_id, opcode), Vec::new()));
 }
 
+/// Store the serial from a host IME event into the state, so that
+/// `commit_state` can forward it to the host compositor.
+fn store_host_serial(ctx: &mut Context, host_id: u32, serial: u32) {
+    if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
+        if let Some(s) = ctx.text_inputs.get_mut(&guest_id) {
+            s.host_serial = serial;
+        }
+    }
+}
+
 pub struct TextInputManagerV1Handler;
 impl zwp_text_input_manager_v1::ZwpTextInputManagerV1Handler for TextInputManagerV1Handler {}
 
@@ -93,8 +103,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
     fn on_keysym(
         &mut self,
         ctx: &mut Context,
-        _serial: u32,
-        _time: u32,
+        serial: u32,
+        time: u32,
         sym: u32,
         state: u32,
         _modifiers: u32,
@@ -102,12 +112,10 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         let host_id = ctx.last_sender_id;
         let sym_char = std::char::from_u32(sym).map(|c| c.to_string()).unwrap_or_default();
         log::trace!(
-            ">>> on_keysym: host_id={}, sym=0x{:x} ({:?}), state={}",
-            host_id,
-            sym,
-            sym_char,
-            state
+            ">>> on_keysym: host_id={}, serial={}, sym=0x{:x} ({:?}), state={}",
+            host_id, serial, sym, sym_char, state
         );
+        store_host_serial(ctx, host_id, serial);
 
         let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
         if let Some(keymap) = xkbcommon::xkb::Keymap::new_from_names(
@@ -133,15 +141,13 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
                 let keyboards = ctx.shadow_table.find_by_interface("wl_keyboard");
                 if let Some(&keyboard_id) = keyboards.first() {
                     log::debug!(
-                        "  -> forwarding wl_keyboard.key: keyboard_id={}, keycode={}, state={}",
-                        keyboard_id,
-                        keycode,
-                        state
+                        "  -> forwarding wl_keyboard.key: keyboard_id={}, serial={}, time={}, keycode={}, state={}",
+                        keyboard_id, serial, time, keycode, state
                     );
                     // Send wl_keyboard::key (opcode 3)
                     let mut builder = MessageBuilder::new();
-                    builder.write_u32(0); // serial
-                    builder.write_u32(0); // time
+                    builder.write_u32(serial); // serial
+                    builder.write_u32(time);   // time
                     builder.write_u32(keycode); // key
                     builder.write_u32(state); // state (0: released, 1: pressed)
                     push_msg(&mut ctx.host_to_client_queue, keyboard_id, 3, builder);
@@ -151,8 +157,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
             } else {
                 log::warn!(
                     "  -> could not find keycode for sym=0x{:x} ({:?})",
-                    sym,
-                    sym_char
+                    sym, sym_char
                 );
             }
         }
@@ -365,6 +370,7 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
                 enabled: false,
                 enabled_changed: false,
                 surrounding_text: None,
+                host_serial: 0,
                 content_hint: 0,
                 content_purpose: 0,
                 cursor_rect: None,
@@ -562,5 +568,96 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
         }
 
         Action::Drop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::text_input_unstable_v1::zwp_text_input_v1::ZwpTextInputV1Handler;
+
+    fn msg_opcode(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u16 {
+        let word2 = u32::from_ne_bytes(queue[idx].0[4..8].try_into().unwrap());
+        (word2 & 0xffff) as u16
+    }
+
+    fn msg_sender(queue: &[(Vec<u8>, Vec<std::os::unix::io::RawFd>)], idx: usize) -> u32 {
+        u32::from_ne_bytes(queue[idx].0[0..4].try_into().unwrap())
+    }
+
+    fn setup_v1_ctx() -> (Context, u32, u32) {
+        let mut ctx = Context::new_for_test(false, false, vec![]);
+        let host_v1_id = 10u32;
+        let guest_id = 20u32;
+        let host_ext_id = 30u32;
+        ctx.shadow_table.map_id(guest_id, host_v1_id);
+        ctx.text_inputs.insert(
+            guest_id,
+            crate::state::TextInputState {
+                host_v1_id,
+                host_ext_id,
+                guest_seat: 0,
+                active_surface: None,
+                enabled: false,
+                enabled_changed: false,
+                surrounding_text: None,
+                host_serial: 0,
+                content_hint: 0,
+                content_purpose: 0,
+                cursor_rect: None,
+                text_change_cause: 0,
+            },
+        );
+        (ctx, host_v1_id, guest_id)
+    }
+
+    #[test]
+    fn on_keysym_forwards_serial_and_time_to_wl_keyboard() {
+        let (mut ctx, host_v1_id, _guest_id) = setup_v1_ctx();
+        ctx.last_sender_id = host_v1_id;
+
+        // Register a guest wl_keyboard ID to capture the forwarded key
+        let guest_keyboard_id = 999u32;
+        ctx.shadow_table.map_id(guest_keyboard_id, 888);
+        ctx.shadow_table
+            .track_interface(guest_keyboard_id, "wl_keyboard".to_string());
+
+        let mut handler = TextInputV1Handler;
+        // 0xff08 is KEY_BackSpace
+        let action = handler.on_keysym(&mut ctx, 123, 456, 0xff08, 1, 0);
+        assert_eq!(action, Action::Drop);
+
+        // State should store host_serial = 123
+        if let Some(state) = ctx.text_inputs.values().next() {
+            assert_eq!(state.host_serial, 123);
+        } else {
+            panic!("state not found");
+        }
+
+        // Should produce 1 message on host_to_client_queue: wl_keyboard::key (opcode 3)
+        assert_eq!(ctx.host_to_client_queue.len(), 1);
+        assert_eq!(msg_opcode(&ctx.host_to_client_queue, 0), 3);
+        assert_eq!(msg_sender(&ctx.host_to_client_queue, 0), guest_keyboard_id);
+
+        let payload = &ctx.host_to_client_queue[0].0[8..];
+        let serial = u32::from_ne_bytes(payload[0..4].try_into().unwrap());
+        let time = u32::from_ne_bytes(payload[4..8].try_into().unwrap());
+        assert_eq!(serial, 123);
+        assert_eq!(time, 456);
+    }
+
+    #[test]
+    fn store_host_serial_saves_serial_to_state() {
+        let (mut ctx, host_v1_id, guest_id) = setup_v1_ctx();
+        store_host_serial(&mut ctx, host_v1_id, 99);
+        let state = ctx.text_inputs.get(&guest_id).unwrap();
+        assert_eq!(state.host_serial, 99);
+    }
+
+    #[test]
+    fn store_host_serial_does_not_panic_for_unknown_host() {
+        let (mut ctx, _host_v1_id, _guest_id) = setup_v1_ctx();
+        // Unknown host ID should not panic.
+        store_host_serial(&mut ctx, 99999, 42);
     }
 }
