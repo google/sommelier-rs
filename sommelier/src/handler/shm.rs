@@ -112,6 +112,7 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
             "VirtWayland channel present={}",
             ctx.virtwayland_channel.is_some()
         );
+        debug!("VirtGpu channel present={}", ctx.virtgpu_channel.is_some());
 
         // Allocate buffer (GBM or VirtWayland)
         let alloc_res = if let Some(channel) = &ctx.virtwayland_channel {
@@ -135,6 +136,41 @@ impl protocols::wayland::wl_shm_pool::WlShmPoolHandler for ShmHandler {
         let (bo, bo_stride, dmabuf_fd_owned, _modifier, blob_offset, total_size) =
             if let Some(res) = alloc_res {
                 res
+            } else if let Some(channel) = &mut ctx.virtgpu_channel {
+                // FIX: Force hardware block alignment (64 pixels = 256 bytes for 32bpp)
+                // This guarantees the host allocator returns a Mesa-compatible stride (e.g., 1024)
+                let aligned_width = (width + 63) & !63;
+                let aligned_height = (height + 63) & !63;
+
+                let drm_format = Self::wl_shm_format_to_drm_format(format);
+
+                debug!(
+                    "Allocating VirtGpu host blob: {}x{}, format={:#010x}",
+                    width, height, drm_format
+                );
+                // Lock the mutex to access the channel
+                match channel.lock().unwrap().allocate_host_blob(
+                    aligned_width as u32,
+                    aligned_height as u32,
+                    drm_format,
+                ) {
+                    Ok((fd, allocated_stride, modifier, offset, size)) => {
+                        // Use returned stride
+                        debug!(
+                        "Allocated VirtGpu blob: fd={}, stride={}, modifier={}, offset={}, size={}",
+                        fd.as_raw_fd(),
+                        allocated_stride,
+                        modifier,
+                        offset,
+                        size
+                    );
+                        (None, allocated_stride, fd, modifier, offset as i32, size)
+                    }
+                    Err(e) => {
+                        error!("Failed to allocate VirtGpu host blob: {}", e);
+                        return Action::Drop;
+                    }
+                }
             } else if let Some(allocator) = &mut ctx.allocator {
                 // Fallback to GBM allocator
                 match allocator.allocate(

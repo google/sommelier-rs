@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 
 mod accelerator;
 mod allocator;
@@ -22,6 +22,7 @@ mod connection;
 mod handler;
 mod proxy;
 mod state;
+mod virtgpu_channel;
 mod virtwl;
 mod virtwl_channel;
 mod wire;
@@ -58,9 +59,11 @@ mod protocols {
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
+#[command(group(ArgGroup::new("channel").multiple(false).required(false)))]
+
 struct Args {
     /// Connect to a local compositor at PATH, used for debug only
-    #[arg(long)]
+    #[arg(long, group = "channel")]
     local_compositor: Option<String>,
 
     /// Enable GPU acceleration (virtio-gpu). Currently broken in this branch!
@@ -71,8 +74,12 @@ struct Args {
     #[arg(long)]
     xdg_decoration: bool,
 
+    /// Use virtgpu channel for Wayland proxying
+    #[arg(long, group = "channel")]
+    virtgpu_channel: bool,
+
     /// Use virtio-wayland channel at PATH (defaults to /dev/wl0 if --local-compositor is not specified)
-    #[arg(long)]
+    #[arg(long, group = "channel")]
     virtio_wl: Option<String>,
 
     /// The display name (e.g. wayland-proxy-0)
@@ -97,7 +104,7 @@ async fn main() {
     let xdg_decoration = args.xdg_decoration;
     let mut virtio_wl = args.virtio_wl;
 
-    if local_compositor.is_none() && virtio_wl.is_none() {
+    if local_compositor.is_none() && virtio_wl.is_none() && !args.virtgpu_channel {
         virtio_wl = Some("/dev/wl0".to_string());
     }
 
@@ -115,6 +122,7 @@ async fn main() {
 
     proxy::run(
         &socket_path,
+        args.virtgpu_channel,
         local_compositor,
         gpu_accel,
         xdg_decoration,

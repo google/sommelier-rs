@@ -17,12 +17,13 @@ limitations under the License.
 use crate::connection::WaylandConnection;
 use crate::protocols;
 use crate::state::Context;
+use crate::virtgpu_channel::VirtGpuChannel;
 use crate::virtwl_channel::VirtWaylandChannel;
 use crate::wire::{ProtocolError, WireMessage};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::{IntoRawFd, RawFd};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::net::{UnixListener, UnixStream};
 
 type DispatchResult = Result<Option<(Vec<u8>, Vec<RawFd>)>, ProtocolError>;
@@ -501,6 +502,7 @@ impl protocols::keyboard_extension_unstable_v1::ProtocolHandler for SommelierHan
 
 pub async fn run(
     display: &str,
+    use_virtgpu: bool,
     local_compositor: Option<String>,
     gpu_accel: bool,
     xdg_decoration: bool,
@@ -546,24 +548,47 @@ pub async fn run(
                 }
                 let client_conn = WaylandConnection::new(client_fd);
 
+                let mut virtgpu_channel_ref = None;
                 let mut virtwayland_channel_ref = None;
 
                 let host_conn = {
                     let mut conn = None;
 
-                    if let Some(path) = &virtio_wayland {
-                        match VirtWaylandChannel::new(path) {
-                            Ok(channel) => {
-                                let channel_arc = Arc::new(channel);
-                                virtwayland_channel_ref = Some(channel_arc.clone());
-                                conn = Some(WaylandConnection::new_virtwayland(channel_arc));
-                            }
+                    if use_virtgpu {
+                        match VirtGpuChannel::new() {
+                            Ok(mut channel) => match channel.init_context() {
+                                Ok(fence) => {
+                                    let channel_arc = Arc::new(Mutex::new(channel));
+                                    virtgpu_channel_ref = Some(channel_arc.clone());
+                                    conn = Some(WaylandConnection::new_virtgpu(channel_arc, fence));
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to init virtgpu context: {}", e);
+                                    continue;
+                                }
+                            },
                             Err(e) => {
-                                log::error!(
-                                    "Failed to open virtio-wayland channel at {}: {}",
-                                    path,
-                                    e
-                                );
+                                log::error!("Failed to connect to virtgpu: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+
+                    if conn.is_none() {
+                        if let Some(path) = &virtio_wayland {
+                            match VirtWaylandChannel::new(path) {
+                                Ok(channel) => {
+                                    let channel_arc = Arc::new(channel);
+                                    virtwayland_channel_ref = Some(channel_arc.clone());
+                                    conn = Some(WaylandConnection::new_virtwayland(channel_arc));
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "Failed to open virtio-wayland channel at {}: {}",
+                                        path,
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
@@ -600,6 +625,9 @@ pub async fn run(
 
                 if let Some(host_conn) = host_conn {
                     let mut client = Client::new(client_conn, host_conn, gpu_accel, xdg_decoration);
+                    if let Some(channel) = virtgpu_channel_ref {
+                        client.ctx.virtgpu_channel = Some(channel);
+                    }
                     if let Some(channel) = virtwayland_channel_ref {
                         client.ctx.virtwayland_channel = Some(channel);
                     }

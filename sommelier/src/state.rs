@@ -16,9 +16,10 @@ limitations under the License.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::io::{OwnedFd, RawFd};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::allocator::Allocator;
+use crate::virtgpu_channel::VirtGpuChannel;
 use crate::virtwl_channel::VirtWaylandChannel;
 use log::warn;
 
@@ -331,6 +332,7 @@ pub struct Context {
     /// Pending messages to send from host→client (e.g. synthetic wl_shm.format).
     pub host_to_client_queue: Vec<(Vec<u8>, Vec<RawFd>)>,
     pub allocator: Option<Allocator>,
+    pub virtgpu_channel: Option<Arc<Mutex<VirtGpuChannel>>>,
     pub virtwayland_channel: Option<Arc<VirtWaylandChannel>>,
     pub host_dmabuf_id: Option<u32>,
     pub host_shm_id: Option<u32>,
@@ -413,6 +415,7 @@ impl Context {
             client_to_host_queue: Vec::new(),
             host_to_client_queue: Vec::new(),
             allocator,
+            virtgpu_channel: None,
             virtwayland_channel: None,
             host_dmabuf_id: None,
             host_shm_id: None,
@@ -446,12 +449,15 @@ impl Context {
     /// ensuring tests always run against a known accelerator configuration
     /// regardless of the environment.
     #[cfg(test)]
-    pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
+    pub fn new_for_test(
+        gpu_accel: bool,
+        xdg_decoration: bool,
+        accelerators: Vec<crate::accelerator::Accelerator>,
+    ) -> Self {
         let mut ctx = Self::new(gpu_accel, xdg_decoration);
         ctx.accelerators = accelerators;
         ctx
     }
-
 }
 
 #[cfg(test)]
@@ -479,7 +485,11 @@ mod tests {
         // The second allocation happens after the counter has wrapped to 2.
         // It must also return a valid ID and must not collide with id1.
         let id2 = table.allocate_host_id();
-        assert!(id2 >= 2, "post-wrap allocation must skip reserved IDs, got {}", id2);
+        assert!(
+            id2 >= 2,
+            "post-wrap allocation must skip reserved IDs, got {}",
+            id2
+        );
         assert_ne!(id1, id2, "successive allocations must return distinct IDs");
     }
 
@@ -497,7 +507,11 @@ mod tests {
         let mut table = ShadowTable::new();
         table.next_host_id = 0;
         let id = table.allocate_host_id();
-        assert!(id >= 2, "post-zero allocation must skip reserved IDs, got {}", id);
+        assert!(
+            id >= 2,
+            "post-zero allocation must skip reserved IDs, got {}",
+            id
+        );
     }
 
     /// Regression: allocate_host_id must not re-issue IDs already registered in
@@ -518,7 +532,11 @@ mod tests {
 
         // The allocator must skip 2 and 3 (in host_interfaces) and return 4.
         let id = table.allocate_host_id();
-        assert_eq!(id, 4, "allocator must skip IDs registered in host_interfaces, got {}", id);
+        assert_eq!(
+            id, 4,
+            "allocator must skip IDs registered in host_interfaces, got {}",
+            id
+        );
         assert!(
             !table.host_interfaces.contains_key(&id) || id == 4,
             "returned ID must not be in host_interfaces"
