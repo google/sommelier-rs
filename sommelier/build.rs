@@ -35,6 +35,10 @@ fn main() {
             "text-input-unstable-v3",
             "../third_party/protocols/text-input-unstable-v3.xml",
         ),
+        (
+            "xdg_decoration_unstable_v1",
+            "../third_party/protocols/xdg-decoration-unstable-v1.xml",
+        ),
     ];
 
     for (name, path_str) in &protocols {

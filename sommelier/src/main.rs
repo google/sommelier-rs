@@ -33,6 +33,10 @@ mod protocols {
         env!("OUT_DIR"),
         "/text-input-unstable-v3_protocol.rs"
     ));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/xdg_decoration_unstable_v1_protocol.rs"
+    ));
 }
 
 #[derive(Parser, Debug)]
@@ -53,6 +57,10 @@ struct Args {
     /// Experimental: Enable GPU acceleration. Not functional
     #[arg(long, hide = true, default_value_t = false)]
     gpu_accel: bool,
+
+    /// Disable xdg-decoration protocol support for server-side decoration.
+    #[arg(long, default_value_t = false)]
+    disable_xdg_decoration: bool,
 }
 
 #[tokio::main]
@@ -65,6 +73,7 @@ async fn main() {
     let display = args.display;
     let local_compositor = args.local_compositor;
     let gpu_accel = args.gpu_accel;
+    let xdg_decoration = !args.disable_xdg_decoration;
     // Default to virtgpu unless local-compositor is specified.
     let use_virtgpu = local_compositor.is_none();
 
@@ -75,5 +84,5 @@ async fn main() {
     // Clean up old socket
     let _ = std::fs::remove_file(&socket_path);
 
-    proxy::run(&socket_path, use_virtgpu, local_compositor, gpu_accel).await;
+    proxy::run(&socket_path, use_virtgpu, local_compositor, gpu_accel, xdg_decoration).await;
 }
