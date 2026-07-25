@@ -87,13 +87,7 @@ impl wl_display::WlDisplayHandler for DisplayHandler {
         Action::Drop
     }
 
-    fn on_error(
-        &mut self,
-        ctx: &mut Context,
-        object_id: u32,
-        code: u32,
-        message: &String,
-    ) -> Action {
+    fn on_error(&mut self, ctx: &mut Context, object_id: u32, code: u32, message: &str) -> Action {
         let guest_id = ctx.shadow_table.get_guest_id(object_id).unwrap_or(0);
         error!(
             "Wayland Error from Host: object_id={} (guest_id={}), code={}, message={}",

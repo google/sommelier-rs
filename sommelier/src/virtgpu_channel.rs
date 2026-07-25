@@ -441,6 +441,7 @@ impl VirtGpuChannel {
         Ok(s.trim_matches(char::from(0)).to_string())
     }
 
+    #[allow(dead_code)]
     pub fn get_resource_info(&self, fd: RawFd) -> Result<DrmVirtgpuResourceInfo, nix::Error> {
         let mut prime = DrmPrimeFdToHandle {
             fd,
@@ -470,6 +471,7 @@ impl VirtGpuChannel {
         Ok(info)
     }
 
+    #[allow(dead_code)]
     pub fn get_device_id(&self) -> Result<u64, nix::Error> {
         let stat = fstat(self.file.get_ref())?;
         Ok(stat.st_rdev)
@@ -1043,6 +1045,7 @@ impl VirtGpuChannel {
         Ok(())
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn recv_wayland(
         &mut self,
     ) -> Result<(Vec<(Vec<u8>, Vec<OwnedFd>)>, Vec<(u32, OwnedFd)>, OwnedFd), nix::Error> {
@@ -1160,7 +1163,7 @@ impl VirtGpuChannel {
                                         || type_ == CROSS_DOMAIN_ID_TYPE_READ_PIPE
                                     {
                                         let res = self.create_pipe_internal(id, type_);
-                                        if let Ok(_) = res {
+                                        if res.is_ok() {
                                             // If we created a WRITE_PIPE, we kept the read end in id_to_fd.
                                             // We need to pump it.
                                             if type_ == CROSS_DOMAIN_ID_TYPE_WRITE_PIPE {
@@ -1245,6 +1248,7 @@ impl VirtGpuChannel {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub fn spawn_virtgpu_actor(
     channel: std::sync::Arc<std::sync::Mutex<VirtGpuChannel>>,
     initial_fence: OwnedFd,

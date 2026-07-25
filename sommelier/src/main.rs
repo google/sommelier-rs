@@ -84,5 +84,12 @@ async fn main() {
     // Clean up old socket
     let _ = std::fs::remove_file(&socket_path);
 
-    proxy::run(&socket_path, use_virtgpu, local_compositor, gpu_accel, xdg_decoration).await;
+    proxy::run(
+        &socket_path,
+        use_virtgpu,
+        local_compositor,
+        gpu_accel,
+        xdg_decoration,
+    )
+    .await;
 }

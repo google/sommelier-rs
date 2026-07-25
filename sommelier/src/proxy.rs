@@ -107,6 +107,7 @@ impl Client {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn dispatch_request(
         handler: &mut SommelierHandler,
         ctx: &mut Context,
@@ -130,6 +131,7 @@ impl Client {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     fn dispatch_event(
         handler: &mut SommelierHandler,
         ctx: &mut Context,

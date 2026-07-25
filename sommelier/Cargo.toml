@@ -28,7 +28,6 @@ nix = { version = "0.31", features = [
 ] }
 tokio = { version = "1.49", features = ["full"] }
 libc = "0.2"
-gbm = { version = "0.16", default-features = false, features = ["drm-support"] }
 drm = "0.14"
 zerocopy = { version = "0.7", features = ["derive"] }
 log = "0.4"
