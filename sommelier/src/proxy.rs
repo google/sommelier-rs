@@ -63,11 +63,16 @@ struct Client {
 }
 
 impl Client {
-    fn new(client_conn: WaylandConnection, host_conn: WaylandConnection, gpu_accel: bool) -> Self {
+    fn new(
+        client_conn: WaylandConnection,
+        host_conn: WaylandConnection,
+        gpu_accel: bool,
+        xdg_decoration: bool,
+    ) -> Self {
         Self {
             client_conn,
             host_conn,
-            ctx: Context::new(gpu_accel),
+            ctx: Context::new(gpu_accel, xdg_decoration),
             handler: SommelierHandler::new(),
         }
     }
@@ -118,6 +123,8 @@ impl Client {
             protocols::viewporter::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v3::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v3::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -139,6 +146,8 @@ impl Client {
             protocols::viewporter::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::text_input_unstable_v3::ALLOWED_INTERFACES.contains(&interface) {
             protocols::text_input_unstable_v3::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -324,11 +333,16 @@ impl protocols::text_input_unstable_v3::ProtocolHandler for SommelierHandler {}
 protocols::viewporter::impl_sommelier_delegates!(SommelierHandler, {});
 impl protocols::viewporter::ProtocolHandler for SommelierHandler {}
 
+// XDG Decoration Protocol
+protocols::xdg_decoration_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {});
+impl protocols::xdg_decoration_unstable_v1::ProtocolHandler for SommelierHandler {}
+
 pub async fn run(
     display: &str,
     use_virtgpu: bool,
     local_compositor: Option<String>,
     gpu_accel: bool,
+    xdg_decoration: bool,
 ) {
     let listener = UnixListener::bind(display).expect("Failed to bind socket");
     log::info!("Listening on {}", display);
@@ -395,7 +409,7 @@ pub async fn run(
                     }
                 };
 
-                let mut client = Client::new(client_conn, host_conn, gpu_accel);
+                let mut client = Client::new(client_conn, host_conn, gpu_accel, xdg_decoration);
                 if let Some(channel) = virtgpu_channel_ref {
                     client.ctx.virtgpu_channel = Some(channel);
                 }

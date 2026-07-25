@@ -20,6 +20,7 @@ use crate::protocols::viewporter::ALLOWED_INTERFACES as VIEWPORTER_ALLOWED;
 use crate::protocols::wayland::wl_registry;
 use crate::protocols::wayland::wl_shm;
 use crate::protocols::wayland::ALLOWED_INTERFACES as WL_ALLOWED;
+use crate::protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES as XDG_DECORATION_ALLOWED;
 use crate::protocols::xdg_shell::ALLOWED_INTERFACES as XDG_ALLOWED;
 use crate::state::Context;
 use crate::wire::{Action, MessageBuilder};
@@ -37,6 +38,12 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
     ) -> Action {
         // Track host globals
         ctx.host_globals.insert(interface.clone(), name);
+
+        if interface == "zxdg_decoration_manager_v1" {
+            if !ctx.xdg_decoration {
+                return Action::Drop;
+            }
+        }
 
         if interface == "zwp_linux_dmabuf_v1" {
             if !ctx.gpu_accel {
@@ -120,6 +127,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             && !DMABUF_ALLOWED.contains(&interface.as_str())
             && !VIEWPORTER_ALLOWED.contains(&interface.as_str())
             && !TEXT_INPUT_ALLOWED.contains(&interface.as_str())
+            && !XDG_DECORATION_ALLOWED.contains(&interface.as_str())
         {
             return Action::Drop;
         }
@@ -185,5 +193,39 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         }
 
         Action::Drop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::wayland::wl_registry::WlRegistryHandler;
+
+    #[test]
+    fn test_xdg_decoration_on_global_enabled() {
+        let mut handler = RegistryHandler;
+        let mut ctx = Context::new(false, true);
+        let action = handler.on_global(
+            &mut ctx,
+            1,
+            &"zxdg_decoration_manager_v1".to_string(),
+            1,
+        );
+        assert_eq!(action, Action::Forward);
+        assert_eq!(ctx.host_globals.get("zxdg_decoration_manager_v1"), Some(&1));
+    }
+
+    #[test]
+    fn test_xdg_decoration_on_global_disabled() {
+        let mut handler = RegistryHandler;
+        let mut ctx = Context::new(false, false);
+        let action = handler.on_global(
+            &mut ctx,
+            1,
+            &"zxdg_decoration_manager_v1".to_string(),
+            1,
+        );
+        assert_eq!(action, Action::Drop);
+        assert_eq!(ctx.host_globals.get("zxdg_decoration_manager_v1"), Some(&1));
     }
 }
