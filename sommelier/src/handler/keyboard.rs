@@ -27,7 +27,10 @@ limitations under the License.
 //! See `docs/KEYBOARD_SHORTCUT_INHIBITION.md` for the full protocol flow.
 
 use crate::handler::text_input::push_msg;
+use crate::protocols::aura_shell::zaura_surface::REQ_UNSET_SNAP;
+use crate::protocols::aura_shell::zaura_toplevel::REQ_SET_WINDOW_BOUNDS;
 use crate::protocols::wayland::wl_keyboard;
+use crate::protocols::xdg_shell::xdg_toplevel::{REQ_UNSET_FULLSCREEN, REQ_UNSET_MAXIMIZED};
 use crate::state::{Context, GuestId, HostId};
 use crate::wire::{Action, MessageBuilder};
 use xkbcommon::xkb;
@@ -55,6 +58,19 @@ const ZCR_EXTENDED_KEYBOARD_DESTROY: u16 = 0;
 const ZCR_EXTENDED_KEYBOARD_ACK_KEY: u16 = 1;
 const ZCR_KEYBOARD_EXTENSION_GET_EXTENDED_KEYBOARD: u16 = 0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowLayoutAction {
+    TopLeft,
+    Top,
+    TopRight,
+    SnapLeft,
+    Fullscreen,
+    SnapRight,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
 /// A read-only view of a shared-memory fd mapped into the process address space.
 ///
 /// All `unsafe` for the mmap/munmap pair is confined here:
@@ -78,7 +94,15 @@ impl MmapView {
         // retain it. The returned pointer owns the mapping until munmap.
         let ptr = unsafe {
             let borrowed = BorrowedFd::borrow_raw(fd);
-            mmap(None, nonzero_len, ProtFlags::PROT_READ, MapFlags::MAP_SHARED, borrowed, 0).ok()?
+            mmap(
+                None,
+                nonzero_len,
+                ProtFlags::PROT_READ,
+                MapFlags::MAP_SHARED,
+                borrowed,
+                0,
+            )
+            .ok()?
         };
         Some(Self { ptr, len })
     }
@@ -100,7 +124,11 @@ impl Drop for MmapView {
         // catches any future copy-paste of this code into a context where
         // that invariant might not hold.
         let res = unsafe { nix::sys::mman::munmap(self.ptr, self.len) };
-        debug_assert!(res.is_ok(), "munmap on a valid mmap mapping must not fail: {:?}", res);
+        debug_assert!(
+            res.is_ok(),
+            "munmap on a valid mmap mapping must not fail: {:?}",
+            res
+        );
     }
 }
 
@@ -161,8 +189,14 @@ impl KeyboardHandler {
     }
 
     /// Check if the pressed key matches any configured host accelerators.
-    fn is_host_accelerator(&self, accelerators: &[crate::accelerator::Accelerator], key: u32) -> bool {
-        let Some(state) = &self.state else { return false; };
+    fn is_host_accelerator(
+        &self,
+        accelerators: &[crate::accelerator::Accelerator],
+        key: u32,
+    ) -> bool {
+        let Some(state) = &self.state else {
+            return false;
+        };
 
         let xkb_keycode = xkb::Keycode::new(key + 8);
         // Use key_get_one_sym so that the full XKB state (including active shift
@@ -183,11 +217,172 @@ impl KeyboardHandler {
         let lower_sym = crate::accelerator::keysym_to_lower(sym.raw());
         for acc in accelerators {
             if self.modifiers == acc.modifiers && lower_sym == acc.symbol {
-                log::trace!("Accelerator match: key={}, modifiers={:#x}, sym={:#x}", key, self.modifiers, lower_sym);
+                log::trace!(
+                    "Accelerator match: key={}, modifiers={:#x}, sym={:#x}",
+                    key,
+                    self.modifiers,
+                    lower_sym
+                );
                 return true;
             }
         }
         false
+    }
+
+    /// Resolve the active guest xdg_toplevel and its backing wl_surface.
+    fn active_xdg_toplevel(ctx: &Context, guest_keyboard_id: u32) -> Option<(u32, u32)> {
+        let guest_seat_id = *ctx.keyboard_to_seat.get(&guest_keyboard_id)?;
+        let active_surface = *ctx.active_surface_for_seat.get(&guest_seat_id)?;
+
+        let guest_wl_surface_id =
+            ctx.xdg_toplevel_to_wl_surface
+                .iter()
+                .find_map(|(&xdg_toplevel_id, &surface_id)| {
+                    (surface_id == active_surface).then_some((xdg_toplevel_id, surface_id))
+                })?;
+        Some(guest_wl_surface_id)
+    }
+
+    fn window_layout_action(&self, key: u32) -> Option<WindowLayoutAction> {
+        let Some(state) = &self.state else {
+            return None;
+        };
+        if self.modifiers != crate::accelerator::ALT_MASK {
+            return None;
+        }
+
+        let xkb_keycode = xkb::Keycode::new(key + 8);
+        let sym = state.key_get_one_sym(xkb_keycode);
+        let lower_sym = crate::accelerator::keysym_to_lower(sym.raw());
+        match lower_sym {
+            xkb::keysyms::KEY_q => Some(WindowLayoutAction::TopLeft),
+            xkb::keysyms::KEY_w => Some(WindowLayoutAction::Top),
+            xkb::keysyms::KEY_e => Some(WindowLayoutAction::TopRight),
+            xkb::keysyms::KEY_a => Some(WindowLayoutAction::SnapLeft),
+            xkb::keysyms::KEY_s => Some(WindowLayoutAction::Fullscreen),
+            xkb::keysyms::KEY_d => Some(WindowLayoutAction::SnapRight),
+            xkb::keysyms::KEY_z => Some(WindowLayoutAction::BottomLeft),
+            xkb::keysyms::KEY_x => Some(WindowLayoutAction::Bottom),
+            xkb::keysyms::KEY_c => Some(WindowLayoutAction::BottomRight),
+            _ => None,
+        }
+    }
+
+    fn queue_xdg_request(ctx: &mut Context, host_xdg_toplevel_id: u32, opcode: u16) {
+        let msg = MessageBuilder::new().build_message(host_xdg_toplevel_id, opcode);
+        ctx.client_to_host_queue.push((msg, Vec::new()));
+    }
+
+    /// Leave compositor-owned states before requesting arbitrary bounds.
+    ///
+    /// ChromeOS keeps a snap/maximize state in Ash's WindowState. A subsequent
+    /// `zaura_toplevel.set_window_bounds` can otherwise be constrained by that
+    /// state (for example, a top-left request becomes a full-height left snap).
+    /// Both requests are harmless when the window is already in the normal
+    /// state, and are required when transitioning from a previously snapped
+    /// or fullscreen window.
+    fn clear_window_state(ctx: &mut Context, host_xdg_toplevel_id: u32, zaura_surface_id: u32) {
+        Self::queue_xdg_request(ctx, host_xdg_toplevel_id, REQ_UNSET_FULLSCREEN);
+        Self::queue_xdg_request(ctx, host_xdg_toplevel_id, REQ_UNSET_MAXIMIZED);
+        let msg = MessageBuilder::new().build_message(zaura_surface_id, REQ_UNSET_SNAP);
+        ctx.client_to_host_queue.push((msg, Vec::new()));
+    }
+
+    fn bounds_for_action(
+        action: WindowLayoutAction,
+        output: crate::state::OutputState,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let (x, y, width, height) = output.work_area()?;
+        let half_width = width / 2;
+        let half_height = height / 2;
+        match action {
+            WindowLayoutAction::TopLeft => Some((x, y, half_width, half_height)),
+            WindowLayoutAction::Top => Some((x, y, width, half_height)),
+            WindowLayoutAction::TopRight => {
+                Some((x + half_width, y, width - half_width, half_height))
+            }
+            WindowLayoutAction::BottomLeft => {
+                Some((x, y + half_height, half_width, height - half_height))
+            }
+            WindowLayoutAction::Bottom => Some((x, y + half_height, width, height - half_height)),
+            WindowLayoutAction::BottomRight => Some((
+                x + half_width,
+                y + half_height,
+                width - half_width,
+                height - half_height,
+            )),
+            WindowLayoutAction::SnapLeft => Some((x, y, half_width, height)),
+            WindowLayoutAction::Fullscreen => Some((x, y, width, height)),
+            WindowLayoutAction::SnapRight => Some((x + half_width, y, width - half_width, height)),
+        }
+    }
+
+    fn apply_window_layout(
+        ctx: &mut Context,
+        guest_keyboard_id: u32,
+        action: WindowLayoutAction,
+    ) -> bool {
+        let Some((guest_xdg_toplevel_id, guest_wl_surface_id)) =
+            Self::active_xdg_toplevel(ctx, guest_keyboard_id)
+        else {
+            log::debug!(
+                "window layout {:?}: no active xdg_toplevel for guest keyboard {}",
+                action,
+                guest_keyboard_id
+            );
+            return false;
+        };
+
+        let Some(host_xdg_toplevel_id) = ctx.shadow_table.get_host_id(guest_xdg_toplevel_id) else {
+            return false;
+        };
+
+        let Some(output_host_id) = ctx.primary_output().map(|(id, _)| id) else {
+            log::debug!(
+                "window layout {:?}: no usable wl_output mode for guest keyboard {}",
+                action,
+                guest_keyboard_id
+            );
+            return false;
+        };
+        let Some(output) = ctx.output_states.get(&output_host_id).copied() else {
+            return false;
+        };
+        let Some((x, y, width, height)) = Self::bounds_for_action(action, output) else {
+            return false;
+        };
+        let Some(zaura_toplevel_id) =
+            crate::handler::compositor::ensure_zaura_toplevel(ctx, guest_xdg_toplevel_id)
+        else {
+            return false;
+        };
+        let Some(zaura_surface_id) =
+            crate::handler::compositor::ensure_zaura_surface(ctx, guest_wl_surface_id)
+        else {
+            return false;
+        };
+
+        Self::clear_window_state(ctx, host_xdg_toplevel_id, zaura_surface_id);
+        let mut builder = MessageBuilder::new();
+        builder.write_i32(x);
+        builder.write_i32(y);
+        builder.write_i32(width);
+        builder.write_i32(height);
+        builder.write_u32(output_host_id);
+        let msg = builder.build_message(zaura_toplevel_id, REQ_SET_WINDOW_BOUNDS);
+        ctx.client_to_host_queue.push((msg, Vec::new()));
+        log::info!(
+            "Applied window layout {:?} bounds=({}, {}, {}, {}) \
+             zaura_toplevel={} output={}",
+            action,
+            x,
+            y,
+            width,
+            height,
+            zaura_toplevel_id,
+            output_host_id
+        );
+        true
     }
 
     /// Ensure the `zcr_extended_keyboard_v1` object is bound for this keyboard.
@@ -212,12 +407,17 @@ impl KeyboardHandler {
     /// those keys. This mirrors the behavior of the C sommelier reference.
     pub(crate) fn ensure_extended_keyboard_bound(ctx: &mut Context, host_keyboard_id: HostId) {
         if let Some(extension_host_id) = ctx.host_keyboard_extension_id {
-            if !ctx.keyboard_to_extended_keyboard.contains_key(&host_keyboard_id) {
+            if !ctx
+                .keyboard_to_extended_keyboard
+                .contains_key(&host_keyboard_id)
+            {
                 let host_extended_id = HostId::from_allocated(ctx.shadow_table.allocate_host_id());
                 ctx.keyboard_to_extended_keyboard
                     .insert(host_keyboard_id, host_extended_id);
-                ctx.shadow_table
-                    .track_host_interface(host_extended_id.0, "zcr_extended_keyboard_v1".to_string());
+                ctx.shadow_table.track_host_interface(
+                    host_extended_id.0,
+                    "zcr_extended_keyboard_v1".to_string(),
+                );
 
                 // zcr_keyboard_extension_v1.get_extended_keyboard(new_id, keyboard)
                 // payload = [new_id(4)][keyboard(4)] = 8 bytes.
@@ -250,7 +450,8 @@ impl KeyboardHandler {
             // Protocol not available on this compositor; silently skip.
             return;
         }
-        let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id) else {
+        let Some(&host_extended_id) = ctx.keyboard_to_extended_keyboard.get(&host_keyboard_id)
+        else {
             log::warn!(
                 "ack_key: no extended keyboard bound for host_keyboard_id={}; \
                  key event arrived before on_enter? serial={}, handled={}",
@@ -376,7 +577,11 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     ) -> Action {
         // on_enter is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
-        let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
+        let guest_keyboard_id = ctx
+            .shadow_table
+            .guest_id_of(host_keyboard_id)
+            .map(|g| g.0)
+            .unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
         // Lazily bind the extended keyboard object on first enter.
@@ -386,32 +591,49 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
 
         log::info!(
             ">>> wl_keyboard.on_enter: host_kb={:?}, guest_kb={}, surface={}, guest_surface={}",
-            host_keyboard_id, guest_keyboard_id, surface, guest_surface_id
+            host_keyboard_id,
+            guest_keyboard_id,
+            surface,
+            guest_surface_id
         );
 
         if guest_surface_id == 0 {
             return Action::Forward;
         }
         let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) else {
-            log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
+            log::warn!(
+                "  -> guest_kb {} not in keyboard_to_seat map",
+                guest_keyboard_id
+            );
             return Action::Forward;
         };
-        log::info!("  -> seat_id={}: setting active_surface={}", guest_seat_id, guest_surface_id);
-        ctx.active_surface_for_seat.insert(guest_seat_id, guest_surface_id);
+        log::info!(
+            "  -> seat_id={}: setting active_surface={}",
+            guest_seat_id,
+            guest_surface_id
+        );
+        ctx.active_surface_for_seat
+            .insert(guest_seat_id, guest_surface_id);
 
         // Find the v3 text input for this seat.
         for (guest_text_input_id, state) in ctx.text_inputs.iter_mut() {
             if state.guest_seat == guest_seat_id {
                 log::info!(
                     "  -> text_input {}: active_surface = {}",
-                    guest_text_input_id, guest_surface_id
+                    guest_text_input_id,
+                    guest_surface_id
                 );
                 state.active_surface = Some(guest_surface_id);
 
                 // Send zwp_text_input_v3.enter (opcode 0).
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(guest_surface_id);
-                push_msg(&mut ctx.host_to_client_queue, *guest_text_input_id, 0, builder);
+                push_msg(
+                    &mut ctx.host_to_client_queue,
+                    *guest_text_input_id,
+                    0,
+                    builder,
+                );
             }
         }
 
@@ -421,19 +643,29 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     fn on_leave(&mut self, ctx: &mut Context, _serial: u32, surface: u32) -> Action {
         // on_leave is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
-        let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
+        let guest_keyboard_id = ctx
+            .shadow_table
+            .guest_id_of(host_keyboard_id)
+            .map(|g| g.0)
+            .unwrap_or(0);
         let guest_surface_id = ctx.shadow_table.get_guest_id(surface).unwrap_or(0);
 
         log::info!(
             ">>> wl_keyboard.on_leave: host_kb={:?}, guest_kb={}, surface={}, guest_surface={}",
-            host_keyboard_id, guest_keyboard_id, surface, guest_surface_id
+            host_keyboard_id,
+            guest_keyboard_id,
+            surface,
+            guest_surface_id
         );
 
         if guest_surface_id == 0 {
             return Action::Forward;
         }
         let Some(&guest_seat_id) = ctx.keyboard_to_seat.get(&guest_keyboard_id) else {
-            log::warn!("  -> guest_kb {} not in keyboard_to_seat map", guest_keyboard_id);
+            log::warn!(
+                "  -> guest_kb {} not in keyboard_to_seat map",
+                guest_keyboard_id
+            );
             return Action::Forward;
         };
         log::info!("  -> seat_id={}: removing active_surface", guest_seat_id);
@@ -451,7 +683,12 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
                 // Send zwp_text_input_v3.leave (opcode 1).
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(guest_surface_id);
-                push_msg(&mut ctx.host_to_client_queue, *guest_text_input_id, 1, builder);
+                push_msg(
+                    &mut ctx.host_to_client_queue,
+                    *guest_text_input_id,
+                    1,
+                    builder,
+                );
             }
         }
 
@@ -470,10 +707,18 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
     ) -> Action {
         // on_key is a host→client event: last_sender_id is the host keyboard ID.
         let host_keyboard_id = HostId::from_event_sender(ctx);
-        let guest_keyboard_id = ctx.shadow_table.guest_id_of(host_keyboard_id).map(|g| g.0).unwrap_or(0);
+        let guest_keyboard_id = ctx
+            .shadow_table
+            .guest_id_of(host_keyboard_id)
+            .map(|g| g.0)
+            .unwrap_or(0);
         log::trace!(
             ">>> wl_keyboard.on_key: host_kb={:?}, guest_kb={}, serial={}, key={}, state={}",
-            host_keyboard_id, guest_keyboard_id, serial, key, state
+            host_keyboard_id,
+            guest_keyboard_id,
+            serial,
+            key,
+            state
         );
         let mut action = Action::Forward;
         let mut handled = true; // Default: guest handles the key.
@@ -485,8 +730,21 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         // pattern and `other` fires only for values not matched above.
         match state {
             WL_KEY_PRESSED => {
+                // Sommelier-owned window layout keys take precedence over host
+                // accelerators. The proxy performs the action itself, so the
+                // key is acknowledged as handled and is not delivered to the
+                // guest application.
+                if let Some(layout_action) = self.window_layout_action(key) {
+                    if self.dropped_keys.contains(&key) {
+                        action = Action::Drop;
+                        handled = true;
+                    } else if Self::apply_window_layout(ctx, guest_keyboard_id, layout_action) {
+                        self.dropped_keys.insert(key);
+                        action = Action::Drop;
+                        handled = true;
+                    }
                 // Key pressed: check if this is a host accelerator.
-                if self.is_host_accelerator(&ctx.accelerators, key) {
+                } else if self.is_host_accelerator(&ctx.accelerators, key) {
                     log::debug!("  -> accelerator key, dropping");
                     action = Action::Drop;
                     handled = false;
@@ -569,7 +827,9 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
             log::debug!(
                 "on_modifiers: XKB state not yet initialised (keymap not received); \
                  modifier event ignored (depressed={:#x}, latched={:#x}, locked={:#x})",
-                mods_depressed, mods_latched, mods_locked
+                mods_depressed,
+                mods_latched,
+                mods_locked
             );
         }
         Action::Forward
@@ -587,7 +847,10 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         log::info!(">>> wl_keyboard.on_release: guest_id={}", guest_id);
         // Translate guest ID → host ID. Returns None for unknown keyboards
         // (e.g. keyboards that never received an on_enter event).
-        let Some(host_keyboard_id) = ctx.shadow_table.host_id_of(GuestId::from_request_sender(ctx)) else {
+        let Some(host_keyboard_id) = ctx
+            .shadow_table
+            .host_id_of(GuestId::from_request_sender(ctx))
+        else {
             return Action::Forward;
         };
         // Clear per-keyboard state: dropped-key set and modifier bitmask.
@@ -601,7 +864,8 @@ impl wl_keyboard::WlKeyboardHandler for KeyboardHandler {
         //   bits and could produce wrong NOT_HANDLED/HANDLED decisions.
         self.dropped_keys.clear();
         self.modifiers = 0;
-        if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id) {
+        if let Some(host_extended_id) = ctx.keyboard_to_extended_keyboard.remove(&host_keyboard_id)
+        {
             // zcr_extended_keyboard_v1.destroy — no payload (8-byte header only).
             let msg = crate::wire::MessageBuilder::new()
                 .build_message(host_extended_id.0, ZCR_EXTENDED_KEYBOARD_DESTROY);
@@ -720,6 +984,162 @@ mod tests {
     }
 
     #[test]
+    fn window_layout_actions_cover_nine_alt_keys() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        let keymap = load_test_keymap(&mut handler, &mut ctx);
+        handler.modifiers = crate::accelerator::ALT_MASK;
+
+        let expected = [
+            (xkb::keysyms::KEY_q, WindowLayoutAction::TopLeft),
+            (xkb::keysyms::KEY_w, WindowLayoutAction::Top),
+            (xkb::keysyms::KEY_e, WindowLayoutAction::TopRight),
+            (xkb::keysyms::KEY_a, WindowLayoutAction::SnapLeft),
+            (xkb::keysyms::KEY_s, WindowLayoutAction::Fullscreen),
+            (xkb::keysyms::KEY_d, WindowLayoutAction::SnapRight),
+            (xkb::keysyms::KEY_z, WindowLayoutAction::BottomLeft),
+            (xkb::keysyms::KEY_x, WindowLayoutAction::Bottom),
+            (xkb::keysyms::KEY_c, WindowLayoutAction::BottomRight),
+        ];
+
+        for (sym, action) in expected {
+            let key = find_keycode(&keymap, sym).expect("layout keysym not found");
+            assert_eq!(handler.window_layout_action(key), Some(action));
+        }
+    }
+
+    #[test]
+    fn window_layout_requires_exact_alt_modifier() {
+        let mut handler = KeyboardHandler::new();
+        let mut ctx = Context::new(false, false);
+        let keymap = load_test_keymap(&mut handler, &mut ctx);
+        let key = find_keycode(&keymap, xkb::keysyms::KEY_q).expect("KEY_q not found");
+
+        handler.modifiers = 0;
+        assert_eq!(handler.window_layout_action(key), None);
+        handler.modifiers = crate::accelerator::ALT_MASK | crate::accelerator::SHIFT_MASK;
+        assert_eq!(handler.window_layout_action(key), None);
+    }
+
+    #[test]
+    fn grid_bounds_use_two_by_two_work_area_cells() {
+        let output = crate::state::OutputState {
+            mode_width: 3840,
+            mode_height: 2160,
+            scale: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::TopLeft, output),
+            Some((0, 0, 1920, 1080))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::Top, output),
+            Some((0, 0, 3840, 1080))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::TopRight, output),
+            Some((1920, 0, 1920, 1080))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::SnapLeft, output),
+            Some((0, 0, 1920, 2160))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::Fullscreen, output),
+            Some((0, 0, 3840, 2160))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::SnapRight, output),
+            Some((1920, 0, 1920, 2160))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::BottomLeft, output),
+            Some((0, 1080, 1920, 1080))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::Bottom, output),
+            Some((0, 1080, 3840, 1080))
+        );
+        assert_eq!(
+            KeyboardHandler::bounds_for_action(WindowLayoutAction::BottomRight, output),
+            Some((1920, 1080, 1920, 1080))
+        );
+    }
+
+    #[test]
+    fn fullscreen_uses_bounds_after_clearing_compositor_state() {
+        let keyboard_id = 10u32;
+        let seat_id = 11u32;
+        let wl_surface_guest_id = 12u32;
+        let xdg_toplevel_guest_id = 13u32;
+        let mut ctx = Context::new_for_test(false, false, vec![]);
+
+        ctx.keyboard_to_seat.insert(keyboard_id, seat_id);
+        ctx.active_surface_for_seat
+            .insert(seat_id, wl_surface_guest_id);
+        ctx.xdg_toplevel_to_wl_surface
+            .insert(xdg_toplevel_guest_id, wl_surface_guest_id);
+        ctx.shadow_table.map_id(wl_surface_guest_id, 22);
+        ctx.shadow_table.map_id(xdg_toplevel_guest_id, 23);
+        ctx.host_zaura_shell_id = Some(24);
+        ctx.host_zaura_shell_version = 38;
+        ctx.output_host_ids.push(25);
+        ctx.output_states.insert(
+            25,
+            crate::state::OutputState {
+                mode_width: 3840,
+                mode_height: 2160,
+                scale: 1,
+                ..Default::default()
+            },
+        );
+
+        assert!(KeyboardHandler::apply_window_layout(
+            &mut ctx,
+            keyboard_id,
+            WindowLayoutAction::Fullscreen,
+        ));
+
+        let opcodes: Vec<u16> = ctx
+            .client_to_host_queue
+            .iter()
+            .map(|(msg, _)| {
+                let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
+                (word2 & 0xffff) as u16
+            })
+            .collect();
+        assert_eq!(
+            opcodes,
+            vec![
+                crate::protocols::aura_shell::zaura_shell::REQ_GET_AURA_TOPLEVEL_FOR_XDG_TOPLEVEL,
+                crate::protocols::aura_shell::zaura_toplevel::REQ_SET_SUPPORTS_SCREEN_COORDINATES,
+                crate::protocols::aura_shell::zaura_shell::REQ_GET_AURA_SURFACE,
+                REQ_UNSET_FULLSCREEN,
+                REQ_UNSET_MAXIMIZED,
+                REQ_UNSET_SNAP,
+                REQ_SET_WINDOW_BOUNDS,
+            ],
+            "fullscreen must use the same state-clearing and bounds path as grid layouts"
+        );
+
+        let bounds_msg = ctx.client_to_host_queue.last().unwrap().0.as_slice();
+        assert_eq!(i32::from_ne_bytes(bounds_msg[8..12].try_into().unwrap()), 0);
+        assert_eq!(
+            i32::from_ne_bytes(bounds_msg[12..16].try_into().unwrap()),
+            0
+        );
+        assert_eq!(
+            i32::from_ne_bytes(bounds_msg[16..20].try_into().unwrap()),
+            3840
+        );
+        assert_eq!(
+            i32::from_ne_bytes(bounds_msg[20..24].try_into().unwrap()),
+            2160
+        );
+    }
+
+    #[test]
     fn accelerator_keys_are_dropped_and_acked_not_handled() {
         let mut handler = KeyboardHandler::new();
         let mut ctx = Context::new_for_test(
@@ -740,7 +1160,8 @@ mod tests {
         // host_keyboard_extension_id must be Some to enable the protocol path.
         // Use non-reserved IDs (not 0 or 1, which are null/wl_display).
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard
+            .insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
 
         // Ctrl+A should be dropped (host accelerator)
@@ -777,7 +1198,8 @@ mod tests {
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard
+            .insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
 
         // Ctrl+B is NOT in accelerators → forward to guest
@@ -812,7 +1234,8 @@ mod tests {
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard
+            .insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
 
         // Press → Drop
@@ -861,8 +1284,7 @@ mod tests {
         use std::ffi::CString;
 
         let name = CString::new("test-keymap-norw").unwrap();
-        let fd = memfd_create(name.as_c_str(), MFdFlags::empty())
-            .expect("memfd_create failed");
+        let fd = memfd_create(name.as_c_str(), MFdFlags::empty()).expect("memfd_create failed");
         nix::unistd::write(&fd, keymap_bytes).expect("write failed");
         // Write the NUL terminator that on_keymap expects (wl_keyboard.keymap.size
         // always includes it). Without this, the mmap covers one byte beyond what
@@ -907,7 +1329,8 @@ mod tests {
 
         // Map entry must be removed so re-binding is possible.
         assert!(
-            !ctx.keyboard_to_extended_keyboard.contains_key(&HostId(host_keyboard_id)),
+            !ctx.keyboard_to_extended_keyboard
+                .contains_key(&HostId(host_keyboard_id)),
             "extended keyboard map must be cleared after release"
         );
 
@@ -917,7 +1340,10 @@ mod tests {
         // Message: [sender_id(4)] [size_opcode(4)]  — opcode 0, len 8.
         let sender = u32::from_ne_bytes(msg[0..4].try_into().unwrap());
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
-        assert_eq!(sender, host_extended_id, "destroy must target host_extended_id");
+        assert_eq!(
+            sender, host_extended_id,
+            "destroy must target host_extended_id"
+        );
         assert_eq!(word2 >> 16, 8, "message length must be 8");
         assert_eq!(word2 & 0xFFFF, 0, "opcode must be 0 (destroy)");
     }
@@ -943,8 +1369,7 @@ mod tests {
     #[test]
     fn is_host_accelerator_returns_false_without_xkb_state() {
         let handler = KeyboardHandler::new(); // no keymap loaded
-        let accelerators =
-            crate::accelerator::parse_accelerators("<Control>a").unwrap();
+        let accelerators = crate::accelerator::parse_accelerators("<Control>a").unwrap();
         // Must degrade gracefully, not panic.
         assert!(
             !handler.is_host_accelerator(&accelerators, 30),
@@ -963,8 +1388,15 @@ mod tests {
         // A zero-size keymap must be rejected gracefully (mmap(len=0) is UB).
         // fd=0 (stdin) won't be mmap'd because the size check fires first.
         let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, 0, 0 /* size=0 */);
-        assert_eq!(action, Action::Forward, "zero-size keymap must forward, not panic");
-        assert!(handler.keymap.is_none(), "keymap must not be set after zero-size event");
+        assert_eq!(
+            action,
+            Action::Forward,
+            "zero-size keymap must forward, not panic"
+        );
+        assert!(
+            handler.keymap.is_none(),
+            "keymap must not be set after zero-size event"
+        );
     }
 
     #[test]
@@ -996,10 +1428,21 @@ mod tests {
         nix::unistd::write(&fd, bad_bytes).expect("write failed");
 
         use std::os::unix::io::AsRawFd;
-        let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, fd.as_raw_fd(), bad_bytes.len() as u32);
+        let action = handler.on_keymap(
+            &mut ctx,
+            1, /* XKB_V1 */
+            fd.as_raw_fd(),
+            bad_bytes.len() as u32,
+        );
         assert_eq!(action, Action::Forward, "invalid UTF-8 must still forward");
-        assert!(handler.keymap.is_none(), "keymap must remain None on parse error");
-        assert!(handler.state.is_none(), "state must remain None on parse error");
+        assert!(
+            handler.keymap.is_none(),
+            "keymap must remain None on parse error"
+        );
+        assert!(
+            handler.state.is_none(),
+            "state must remain None on parse error"
+        );
     }
 
     #[test]
@@ -1017,10 +1460,25 @@ mod tests {
         nix::unistd::write(&fd, garbage).expect("write failed");
 
         use std::os::unix::io::AsRawFd;
-        let action = handler.on_keymap(&mut ctx, 1 /* XKB_V1 */, fd.as_raw_fd(), garbage.len() as u32);
-        assert_eq!(action, Action::Forward, "invalid XKB string must still forward");
-        assert!(handler.keymap.is_none(), "keymap must remain None on XKB compile error");
-        assert!(handler.state.is_none(), "state must remain None on XKB compile error");
+        let action = handler.on_keymap(
+            &mut ctx,
+            1, /* XKB_V1 */
+            fd.as_raw_fd(),
+            garbage.len() as u32,
+        );
+        assert_eq!(
+            action,
+            Action::Forward,
+            "invalid XKB string must still forward"
+        );
+        assert!(
+            handler.keymap.is_none(),
+            "keymap must remain None on XKB compile error"
+        );
+        assert!(
+            handler.state.is_none(),
+            "state must remain None on XKB compile error"
+        );
     }
 
     #[test]
@@ -1030,7 +1488,7 @@ mod tests {
         // must not panic or silently send a garbage ack. No queue entry expected.
         let mut ctx = Context::new(false, false);
         ctx.host_keyboard_extension_id = Some(HostId(99)); // protocol bound
-        // keyboard_to_extended_keyboard is empty (on_enter not yet received)
+                                                           // keyboard_to_extended_keyboard is empty (on_enter not yet received)
 
         KeyboardHandler::send_ack_key(&mut ctx, HostId(10), 1, true);
 
@@ -1052,7 +1510,11 @@ mod tests {
         let (msg, _) = &ctx.client_to_host_queue[0];
         let word2 = u32::from_ne_bytes(msg[4..8].try_into().unwrap());
         let opcode = word2 & 0xFFFF;
-        assert_eq!(opcode, 0, "get_extended_keyboard must use opcode 0, got {}", opcode);
+        assert_eq!(
+            opcode, 0,
+            "get_extended_keyboard must use opcode 0, got {}",
+            opcode
+        );
     }
 
     /// Structural regression: dropped_keys must be cleared when the keyboard is released.
@@ -1075,7 +1537,8 @@ mod tests {
             find_keycode(&keymap, xkb::keysyms::KEY_a).expect("KEY_a not found in keymap");
 
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(10), HostId(50));
+        ctx.keyboard_to_extended_keyboard
+            .insert(HostId(10), HostId(50));
 
         // Press Ctrl+A (host accelerator) with host keyboard ID 10.
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
@@ -1083,7 +1546,10 @@ mod tests {
         ctx.last_sender_id = 10; // host keyboard ID (on_key is host→client)
         let action = handler.on_key(&mut ctx, 1, 0, wl_key_a, WL_KEY_PRESSED);
         assert_eq!(action, Action::Drop);
-        assert!(handler.dropped_keys.contains(&wl_key_a), "key must be in dropped_keys after drop");
+        assert!(
+            handler.dropped_keys.contains(&wl_key_a),
+            "key must be in dropped_keys after drop"
+        );
 
         // Guest destroys the keyboard (client→host: last_sender_id is the guest ID).
         ctx.shadow_table.map_id(5, 10); // guest 5 ↔ host 10
@@ -1152,7 +1618,11 @@ mod tests {
             "ZCR_EXTENDED_KEYBOARD_DESTROY constant out of sync with generated protocol"
         );
         assert_eq!(
-            ExtKbReq::AckKey { serial: 0, handled: 0 }.opcode(),
+            ExtKbReq::AckKey {
+                serial: 0,
+                handled: 0
+            }
+            .opcode(),
             ZCR_EXTENDED_KEYBOARD_ACK_KEY,
             "ZCR_EXTENDED_KEYBOARD_ACK_KEY constant out of sync with generated protocol"
         );
@@ -1183,7 +1653,8 @@ mod tests {
         let ctrl_mask = 1 << keymap.mod_get_index("Control");
         handler.on_modifiers(&mut ctx, 0, ctrl_mask, 0, 0, 0);
         ctx.host_keyboard_extension_id = Some(HostId(99));
-        ctx.keyboard_to_extended_keyboard.insert(HostId(5), HostId(50));
+        ctx.keyboard_to_extended_keyboard
+            .insert(HostId(5), HostId(50));
         ctx.last_sender_id = 5;
         let action = handler.on_key(&mut ctx, 1, 0, wl_key_a, WL_KEY_PRESSED);
         assert_eq!(action, Action::Drop);
@@ -1247,4 +1718,3 @@ mod tests {
         );
     }
 }
-

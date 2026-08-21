@@ -294,6 +294,42 @@ pub struct SurfaceState {
     pub pending_buffer_id: Option<u32>,
 }
 
+/// Host output geometry used for compositor-owned window layout requests.
+///
+/// `wl_output.mode` reports pixel dimensions while Aura window bounds use
+/// logical screen coordinates. `scale` converts the former into the latter;
+/// Aura output insets then remove the shelf/non-work-area margins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OutputState {
+    pub mode_width: i32,
+    pub mode_height: i32,
+    pub scale: i32,
+    pub insets_top: i32,
+    pub insets_left: i32,
+    pub insets_bottom: i32,
+    pub insets_right: i32,
+}
+
+impl OutputState {
+    pub fn work_area(self) -> Option<(i32, i32, i32, i32)> {
+        let scale = self.scale.max(1);
+        let width = self.mode_width.checked_div(scale)?;
+        let height = self.mode_height.checked_div(scale)?;
+        let x = self.insets_left;
+        let y = self.insets_top;
+        let width = width
+            .checked_sub(self.insets_left)?
+            .checked_sub(self.insets_right)?;
+        let height = height
+            .checked_sub(self.insets_top)?
+            .checked_sub(self.insets_bottom)?;
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        Some((x, y, width, height))
+    }
+}
+
 pub struct PendingParam {
     pub fd: RawFd,
     pub plane_idx: u32,
@@ -361,12 +397,25 @@ pub struct Context {
     pub host_zaura_shell_version: u32,
     /// VM identifier for ChromeOS guest_os app ID formatting (from SOMMELIER_VM_IDENTIFIER).
     pub vm_identifier: String,
+    /// Experimental host-policy workaround: identify the host surface as an
+    /// ARC window so Exo permits `zaura_toplevel.set_window_bounds`.
+    ///
+    /// ChromeOS currently allows arbitrary bounds only for ARC windows. This
+    /// is intentionally opt-in because the host also applies ARC-specific
+    /// properties (for example IME handling and restore metadata).
+    pub window_bounds_as_arc: bool,
     /// Maps host wl_surface ID → host zaura_surface ID for app ID passthrough.
     pub wl_surface_to_zaura_surface: HashMap<u32, u32>,
     /// Tracks xdg_surface → wl_surface associations (guest IDs).
     pub xdg_surface_to_wl_surface: HashMap<u32, u32>,
     /// Tracks xdg_toplevel → wl_surface associations (guest IDs).
     pub xdg_toplevel_to_wl_surface: HashMap<u32, u32>,
+    /// Host wl_output IDs advertised to the guest.
+    pub output_host_ids: Vec<u32>,
+    /// Output mode/scale/insets keyed by host wl_output ID.
+    pub output_states: HashMap<u32, OutputState>,
+    /// Maps guest xdg_toplevel IDs → host zaura_toplevel IDs.
+    pub xdg_toplevel_to_zaura_toplevel: HashMap<u32, u32>,
 }
 
 impl Context {
@@ -432,10 +481,24 @@ impl Context {
             host_zaura_shell_version: 0,
             vm_identifier: std::env::var("SOMMELIER_VM_IDENTIFIER")
                 .unwrap_or_else(|_| "termina".to_string()),
+            window_bounds_as_arc: std::env::var_os("SOMMELIER_WINDOW_BOUNDS_AS_ARC").is_some(),
             wl_surface_to_zaura_surface: HashMap::new(),
             xdg_surface_to_wl_surface: HashMap::new(),
             xdg_toplevel_to_wl_surface: HashMap::new(),
+            output_host_ids: Vec::new(),
+            output_states: HashMap::new(),
+            xdg_toplevel_to_zaura_toplevel: HashMap::new(),
         }
+    }
+
+    /// Return the first output with a usable mode. Crostini normally exposes
+    /// one output; retaining the host ID alongside the geometry lets the
+    /// caller pass the correct wl_output object to Aura requests.
+    pub fn primary_output(&self) -> Option<(u32, OutputState)> {
+        self.output_host_ids.iter().find_map(|&host_id| {
+            let state = *self.output_states.get(&host_id)?;
+            state.work_area().map(|_| (host_id, state))
+        })
     }
 
     /// Test-only constructor that overrides `SOMMELIER_ACCELERATORS` after construction.
@@ -447,12 +510,15 @@ impl Context {
     /// ensuring tests always run against a known accelerator configuration
     /// regardless of the environment.
     #[cfg(test)]
-    pub fn new_for_test(gpu_accel: bool, xdg_decoration: bool, accelerators: Vec<crate::accelerator::Accelerator>) -> Self {
+    pub fn new_for_test(
+        gpu_accel: bool,
+        xdg_decoration: bool,
+        accelerators: Vec<crate::accelerator::Accelerator>,
+    ) -> Self {
         let mut ctx = Self::new(gpu_accel, xdg_decoration);
         ctx.accelerators = accelerators;
         ctx
     }
-
 }
 
 #[cfg(test)]
@@ -480,7 +546,11 @@ mod tests {
         // The second allocation happens after the counter has wrapped to 2.
         // It must also return a valid ID and must not collide with id1.
         let id2 = table.allocate_host_id();
-        assert!(id2 >= 2, "post-wrap allocation must skip reserved IDs, got {}", id2);
+        assert!(
+            id2 >= 2,
+            "post-wrap allocation must skip reserved IDs, got {}",
+            id2
+        );
         assert_ne!(id1, id2, "successive allocations must return distinct IDs");
     }
 
@@ -498,7 +568,11 @@ mod tests {
         let mut table = ShadowTable::new();
         table.next_host_id = 0;
         let id = table.allocate_host_id();
-        assert!(id >= 2, "post-zero allocation must skip reserved IDs, got {}", id);
+        assert!(
+            id >= 2,
+            "post-zero allocation must skip reserved IDs, got {}",
+            id
+        );
     }
 
     /// Regression: allocate_host_id must not re-issue IDs already registered in
@@ -519,7 +593,11 @@ mod tests {
 
         // The allocator must skip 2 and 3 (in host_interfaces) and return 4.
         let id = table.allocate_host_id();
-        assert_eq!(id, 4, "allocator must skip IDs registered in host_interfaces, got {}", id);
+        assert_eq!(
+            id, 4,
+            "allocator must skip IDs registered in host_interfaces, got {}",
+            id
+        );
         assert!(
             !table.host_interfaces.contains_key(&id) || id == 4,
             "returned ID must not be in host_interfaces"
@@ -552,6 +630,34 @@ mod tests {
                 def
             );
         }
+    }
+
+    #[test]
+    fn output_work_area_converts_scale_and_insets() {
+        let output = OutputState {
+            mode_width: 3840,
+            mode_height: 2160,
+            scale: 2,
+            insets_top: 24,
+            insets_left: 8,
+            insets_bottom: 48,
+            insets_right: 16,
+        };
+        assert_eq!(output.work_area(), Some((8, 24, 1896, 1008)));
+    }
+
+    #[test]
+    fn output_work_area_rejects_invalid_dimensions() {
+        let output = OutputState {
+            mode_width: 100,
+            mode_height: 100,
+            scale: 2,
+            insets_top: 60,
+            insets_left: 0,
+            insets_bottom: 0,
+            insets_right: 0,
+        };
+        assert_eq!(output.work_area(), None);
     }
 }
 

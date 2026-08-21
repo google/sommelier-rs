@@ -49,7 +49,11 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         _commit: &String,
     ) -> Action {
         let host_id = ctx.last_sender_id;
-        log::trace!(">>> on_preedit_string: host_id={}, text={:?}", host_id, text);
+        log::trace!(
+            ">>> on_preedit_string: host_id={}, text={:?}",
+            host_id,
+            text
+        );
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
             // v3 preedit_string (opcode 2)
             let mut builder = MessageBuilder::new();
@@ -63,11 +67,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
 
     fn on_commit_string(&mut self, ctx: &mut Context, _serial: u32, text: &String) -> Action {
         let host_id = ctx.last_sender_id;
-        log::trace!(
-            ">>> on_commit_string: host_id={}, text={:?}",
-            host_id,
-            text
-        );
+        log::trace!(">>> on_commit_string: host_id={}, text={:?}", host_id, text);
         if let Some(guest_id) = ctx.shadow_table.get_guest_id(host_id) {
             // v3 preedit_string (opcode 2) - explicitly clear preedit before commit
             let mut builder = MessageBuilder::new();
@@ -100,7 +100,9 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         _modifiers: u32,
     ) -> Action {
         let host_id = ctx.last_sender_id;
-        let sym_char = std::char::from_u32(sym).map(|c| c.to_string()).unwrap_or_default();
+        let sym_char = std::char::from_u32(sym)
+            .map(|c| c.to_string())
+            .unwrap_or_default();
         log::trace!(
             ">>> on_keysym: host_id={}, sym=0x{:x} ({:?}), state={}",
             host_id,
@@ -251,12 +253,7 @@ impl zcr_text_input_extension_v1::ZcrTextInputExtensionV1Handler for TextInputEx
 
 pub struct ExtendedTextInputV1Handler;
 impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextInputV1Handler {
-    fn on_set_preedit_region(
-        &mut self,
-        ctx: &mut Context,
-        _index: i32,
-        _length: u32,
-    ) -> Action {
+    fn on_set_preedit_region(&mut self, ctx: &mut Context, _index: i32, _length: u32) -> Action {
         let host_ext_id = ctx.last_sender_id;
         log::trace!(
             ">>> on_set_preedit_region: host_ext_id={}, index={}, length={}",
@@ -342,7 +339,12 @@ impl zwp_text_input_manager_v3::ZwpTextInputManagerV3Handler for TextInputManage
             let mut builder = MessageBuilder::new();
             builder.write_u32(host_ext_id);
             builder.write_u32(host_v1_id);
-            push_msg(&mut ctx.client_to_host_queue, host_ext_manager_id, 0, builder);
+            push_msg(
+                &mut ctx.client_to_host_queue,
+                host_ext_manager_id,
+                0,
+                builder,
+            );
         }
 
         ctx.shadow_table.map_id(id, host_v1_id);
@@ -544,7 +546,12 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
                 ext_builder.write_u32(input_flags);
                 ext_builder.write_u32(learning_mode);
                 ext_builder.write_u32(inline_composition_support);
-                push_msg(&mut ctx.client_to_host_queue, state.host_ext_id, 6, ext_builder);
+                push_msg(
+                    &mut ctx.client_to_host_queue,
+                    state.host_ext_id,
+                    6,
+                    ext_builder,
+                );
 
                 state.content_hint = 0;
                 state.content_purpose = 0;

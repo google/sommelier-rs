@@ -195,10 +195,24 @@ impl Client {
         {
             protocols::keyboard_extension_unstable_v1::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::aura_shell::ALLOWED_INTERFACES.contains(&interface) {
-            // Silently drop events for internally-bound aura_shell objects.
-            // We only use these interfaces to send requests (set_application_id
-            // via zaura_surface), never to receive events.
-            Ok(None)
+            if interface == "zaura_toplevel" {
+                // set_supports_screen_coordinates makes Exo emit
+                // zaura_toplevel.configure instead of xdg_toplevel.configure.
+                // The Aura object is internal to Sommelier, but the guest
+                // xdg client still needs the configure width/height/state
+                // event in order to resize and redraw. CompositorHandler
+                // translates this event back to the guest xdg_toplevel.
+                protocols::aura_shell::zaura_toplevel::dispatch_event(
+                    msg,
+                    &mut handler.compositor,
+                    ctx,
+                )
+            } else {
+                // Other Aura objects are bound internally and have no guest
+                // peer. Their host events must never be forwarded with sender
+                // ID 0.
+                Ok(None)
+            }
         } else {
             Ok(None)
         }
@@ -247,6 +261,16 @@ impl Client {
                     .or_else(|| guest_id.and_then(|gid| self.ctx.shadow_table.get_interface(gid)))
                     .cloned(),
             };
+            // Generated xdg_surface::get_toplevel allocates/maps the guest
+            // xdg_toplevel only while dispatching the request.  The
+            // CompositorHandler therefore cannot create its host
+            // zaura_toplevel from on_get_toplevel itself: at that point the
+            // guest→host mapping does not exist yet.  Remember this request so
+            // we can create the Aura child immediately after dispatch has
+            // installed the mapping, still before a later surface commit.
+            let is_xdg_surface_get_toplevel = matches!(direction, Direction::ClientToHost)
+                && interface.as_deref() == Some("xdg_surface")
+                && opcode == crate::protocols::xdg_shell::xdg_surface::REQ_GET_TOPLEVEL;
 
             let mut consumed_fds = 0;
             let result = if let Some(interface) = interface {
@@ -290,6 +314,19 @@ impl Client {
                 }
                 Ok(None)
             };
+
+            if is_xdg_surface_get_toplevel && packet.len() >= 12 {
+                let guest_xdg_toplevel_id = u32::from_ne_bytes(packet[8..12].try_into().unwrap());
+                let aura_id = crate::handler::compositor::ensure_zaura_toplevel(
+                    &mut self.ctx,
+                    guest_xdg_toplevel_id,
+                );
+                log::debug!(
+                    "post-dispatch xdg_surface.get_toplevel guest={} -> zaura_toplevel={:?}",
+                    guest_xdg_toplevel_id,
+                    aura_id
+                );
+            }
 
             match result {
                 Ok(Some((mut data, fds))) => {
@@ -428,6 +465,7 @@ protocols::wayland::impl_sommelier_delegates!(SommelierHandler, {
     wl_callback: callback,
     wl_compositor: compositor,
     wl_surface: compositor,
+    wl_output: compositor,
     wl_subcompositor: compositor,
     wl_subsurface: compositor,
     wl_region: compositor,

@@ -91,7 +91,9 @@ pub(crate) fn parse_accelerator(token: &str) -> Result<Accelerator, ParseError> 
     let mut modifiers = 0;
 
     while token.starts_with('<') {
-        let end_idx = token.find('>').ok_or_else(|| ParseError::InvalidModifier(token.to_string()))?;
+        let end_idx = token
+            .find('>')
+            .ok_or_else(|| ParseError::InvalidModifier(token.to_string()))?;
         let mod_tag = &token[..=end_idx];
         match mod_tag.to_ascii_lowercase().as_str() {
             // Accept both the full XKB names and common shorthands used in
@@ -147,11 +149,7 @@ pub fn parse_accelerators(s: &str) -> Result<Vec<Accelerator>, ParseError> {
 /// This includes standard ChromeOS IME switcher shortcuts to ensure IME switching
 /// works out-of-the-box even if SOMMELIER_ACCELERATORS is empty.
 pub fn default_accelerators() -> Vec<Accelerator> {
-    let defaults = [
-        "<Control>space",
-        "<Control><Shift>space",
-        "<Super>space",
-    ];
+    let defaults = ["<Control>space", "<Control><Shift>space", "<Super>space"];
     let mut result = Vec::new();
     for def in &defaults {
         if let Ok(acc) = parse_accelerator(def) {
@@ -167,10 +165,8 @@ mod tests {
 
     #[test]
     fn parse_accelerators_standard_list() {
-        let list = parse_accelerators(
-            "Super_L,<Alt>bracketleft,<ALT>bracketright,<Control>space",
-        )
-        .unwrap();
+        let list = parse_accelerators("Super_L,<Alt>bracketleft,<ALT>bracketright,<Control>space")
+            .unwrap();
         assert_eq!(list.len(), 4);
 
         assert_eq!(list[0].modifiers, 0);
