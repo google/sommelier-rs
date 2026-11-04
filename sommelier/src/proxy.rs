@@ -126,6 +126,8 @@ impl Client {
             protocols::text_input_unstable_v3::dispatch_request(interface, msg, handler, ctx)
         } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::xdg_decoration_unstable_v1::dispatch_request(interface, msg, handler, ctx)
+        } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::fractional_scale_v1::dispatch_request(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -150,6 +152,8 @@ impl Client {
             protocols::text_input_unstable_v3::dispatch_event(interface, msg, handler, ctx)
         } else if protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES.contains(&interface) {
             protocols::xdg_decoration_unstable_v1::dispatch_event(interface, msg, handler, ctx)
+        } else if protocols::fractional_scale_v1::ALLOWED_INTERFACES.contains(&interface) {
+            protocols::fractional_scale_v1::dispatch_event(interface, msg, handler, ctx)
         } else {
             Ok(None)
         }
@@ -338,6 +342,10 @@ impl protocols::viewporter::ProtocolHandler for SommelierHandler {}
 // XDG Decoration Protocol
 protocols::xdg_decoration_unstable_v1::impl_sommelier_delegates!(SommelierHandler, {});
 impl protocols::xdg_decoration_unstable_v1::ProtocolHandler for SommelierHandler {}
+
+// Fractional scale protocol
+protocols::fractional_scale_v1::impl_sommelier_delegates!(SommelierHandler, {});
+impl protocols::fractional_scale_v1::ProtocolHandler for SommelierHandler {}
 
 pub async fn run(
     display: &str,

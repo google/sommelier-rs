@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+use crate::protocols::fractional_scale_v1::ALLOWED_INTERFACES as FRACTIONAL_SCALE_ALLOWED;
 use crate::protocols::linux_dmabuf_v1::ALLOWED_INTERFACES as DMABUF_ALLOWED;
 use crate::protocols::text_input_unstable_v3::ALLOWED_INTERFACES as TEXT_INPUT_ALLOWED;
 use crate::protocols::viewporter::ALLOWED_INTERFACES as VIEWPORTER_ALLOWED;
@@ -122,6 +123,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             && !VIEWPORTER_ALLOWED.contains(&interface)
             && !TEXT_INPUT_ALLOWED.contains(&interface)
             && !XDG_DECORATION_ALLOWED.contains(&interface)
+            && !FRACTIONAL_SCALE_ALLOWED.contains(&interface)
         {
             return Action::Drop;
         }

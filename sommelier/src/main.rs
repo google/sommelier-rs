@@ -29,6 +29,7 @@ mod protocols {
     include!(concat!(env!("OUT_DIR"), "/xdg_shell_protocol.rs"));
     include!(concat!(env!("OUT_DIR"), "/linux_dmabuf_v1_protocol.rs"));
     include!(concat!(env!("OUT_DIR"), "/viewporter_protocol.rs"));
+    include!(concat!(env!("OUT_DIR"), "/fractional_scale_v1_protocol.rs"));
     include!(concat!(
         env!("OUT_DIR"),
         "/text-input-unstable-v3_protocol.rs"
