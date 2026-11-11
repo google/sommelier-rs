@@ -250,10 +250,6 @@ impl zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1Handler for LinuxDmab
             //     continue;
             // }
 
-            if modifier == 0 {
-                continue;
-            }
-
             // KEEP the host's true modifier! Do NOT force linear.
             // This allows Chrome to see Tiled modifiers and successfully
             // allocate buffers with the Texturing usage flag.
