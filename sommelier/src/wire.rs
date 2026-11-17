@@ -91,13 +91,13 @@ impl<'a> WireMessage<'a> {
         Ok((v as f32) / 256.0)
     }
 
-    pub fn read_string(&mut self) -> Result<String, ProtocolError> {
+    pub fn read_optional_string(&mut self) -> Result<Option<String>, ProtocolError> {
         let len = self.read_u32()? as usize;
         if len == 0 {
-            return Ok(String::new());
+            return Ok(None);
         }
         // Strings are padded to 32-bit boundary
-        let padded_len = (len + 3) & !3;
+        let padded_len = len.checked_add(3).ok_or(ProtocolError::InvalidString)? & !3;
 
         if self.offset + padded_len > self.payload.len() {
             log::error!(
@@ -125,7 +125,12 @@ impl<'a> WireMessage<'a> {
         let s = String::from_utf8_lossy(&bytes[..null_pos]).into_owned();
 
         self.offset += padded_len;
-        Ok(s)
+        Ok(Some(s))
+    }
+
+    pub fn read_string(&mut self) -> Result<String, ProtocolError> {
+        self.read_optional_string()?
+            .ok_or(ProtocolError::InvalidString)
     }
 
     pub fn read_array(&mut self) -> Result<Vec<u8>, ProtocolError> {
@@ -198,6 +203,13 @@ impl MessageBuilder {
             .resize(self.payload.len() + padding as usize, 0);
     }
 
+    pub fn write_optional_string(&mut self, val: Option<&str>) {
+        match val {
+            Some(s) => self.write_string(s),
+            None => self.write_u32(0),
+        }
+    }
+
     pub fn write_array(&mut self, val: &[u8]) {
         let len = val.len() as u32;
         self.write_u32(len);
@@ -259,5 +271,28 @@ impl MessageBuilder {
         msg.extend_from_slice(&((total_len << 16) | opcode as u32).to_ne_bytes());
         msg.extend_from_slice(&self.payload);
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_optional_string_wire_encoding() {
+        let mut b = MessageBuilder::new();
+        b.write_optional_string(None);
+        b.write_optional_string(Some(""));
+        b.write_optional_string(Some("abc"));
+        // None = 4B (len 0), Some("") = 8B (len 1 + padded NUL), Some("abc") = 8B (len 4 + "abc\0")
+        assert_eq!(b.payload.len(), 20);
+
+        let mut msg = WireMessage::new(1, 0, &b.payload, &[]);
+        assert_eq!(msg.read_optional_string(), Ok(None));
+        assert_eq!(msg.read_optional_string(), Ok(Some(String::new())));
+        assert_eq!(msg.read_optional_string(), Ok(Some("abc".to_string())));
+
+        let mut null_msg = WireMessage::new(1, 0, &b.payload[..4], &[]);
+        assert_eq!(null_msg.read_string(), Err(ProtocolError::InvalidString));
     }
 }

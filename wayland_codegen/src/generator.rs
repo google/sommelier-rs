@@ -134,7 +134,13 @@ fn map_type(arg: &Arg) -> TokenStream {
         "int" => quote! { i32 },
         "uint" => quote! { u32 },
         "fixed" => quote! { f32 },
-        "string" => quote! { String },
+        "string" => {
+            if arg.allow_null.unwrap_or(false) {
+                quote! { Option<String> }
+            } else {
+                quote! { String }
+            }
+        }
         "object" => quote! { u32 },
         "new_id" => {
             if arg.interface.is_none() {
@@ -152,7 +158,7 @@ fn map_type(arg: &Arg) -> TokenStream {
 fn map_type_fq(arg: &Arg) -> TokenStream {
     match arg.typ.as_str() {
         "fd" => quote! { std::os::unix::io::RawFd },
-        // For other types, map_type returns primitives or standard library types (String, Vec)
+        // For other types, map_type returns primitives or standard library types (String, Option, Vec)
         // or tuples of them, so it's safe to reuse.
         _ => map_type(arg),
     }
@@ -163,7 +169,13 @@ fn map_read_fn(arg: &Arg) -> TokenStream {
         "int" => quote! { msg.read_i32()? },
         "uint" => quote! { msg.read_u32()? },
         "fixed" => quote! { msg.read_fixed()? },
-        "string" => quote! { msg.read_string()? },
+        "string" => {
+            if arg.allow_null.unwrap_or(false) {
+                quote! { msg.read_optional_string()? }
+            } else {
+                quote! { msg.read_string()? }
+            }
+        }
         "object" => quote! { msg.read_u32()? },
         "new_id" => {
             if arg.interface.is_none() {
@@ -194,7 +206,13 @@ fn map_write_fn(arg: &Arg, name: &Ident) -> TokenStream {
             }
         }
         "fixed" => quote! { builder.write_fixed(#name) },
-        "string" => quote! { builder.write_string(&#name) },
+        "string" => {
+            if arg.allow_null.unwrap_or(false) {
+                quote! { builder.write_optional_string(#name.as_deref()) }
+            } else {
+                quote! { builder.write_string(&#name) }
+            }
+        }
         "array" => quote! { builder.write_array(&#name) },
         "fd" => quote! { builder.write_fd(#name) },
         _ => quote! { builder.write_u32(#name) },
@@ -266,8 +284,13 @@ fn generate_interface(interface: &Interface) -> TokenStream {
                         let name = sanitize_ident(&arg.name);
                         field_names_list.push(name.clone());
 
-                        if arg.typ == "string"
-                            || arg.typ == "array"
+                        if arg.typ == "string" {
+                            if arg.allow_null.unwrap_or(false) {
+                                handler_call_args.push(quote! { #name.as_deref() });
+                            } else {
+                                handler_call_args.push(quote! { &#name });
+                            }
+                        } else if arg.typ == "array"
                             || (arg.typ == "new_id" && arg.interface.is_none())
                         {
                             handler_call_args.push(quote! { &#name });
@@ -393,8 +416,13 @@ fn generate_interface(interface: &Interface) -> TokenStream {
                         let name = sanitize_ident(&arg.name);
                         field_names_list.push(name.clone());
 
-                        if arg.typ == "string"
-                            || arg.typ == "array"
+                        if arg.typ == "string" {
+                            if arg.allow_null.unwrap_or(false) {
+                                handler_call_args.push(quote! { #name.as_deref() });
+                            } else {
+                                handler_call_args.push(quote! { &#name });
+                            }
+                        } else if arg.typ == "array"
                             || (arg.typ == "new_id" && arg.interface.is_none())
                         {
                             handler_call_args.push(quote! { &#name });
@@ -670,7 +698,11 @@ fn generate_handler_args(items: &[MessageItem]) -> TokenStream {
             let name = format_ident!("_{}", sanitize_ident(&arg.name));
             let ty = map_type(arg);
             if arg.typ == "string" {
-                args.push(quote! { #name: &str });
+                if arg.allow_null.unwrap_or(false) {
+                    args.push(quote! { #name: Option<&str> });
+                } else {
+                    args.push(quote! { #name: &str });
+                }
             } else if arg.typ == "array" {
                 args.push(quote! { #name: &[u8] });
             } else if arg.typ == "new_id" && arg.interface.is_none() {
@@ -690,7 +722,11 @@ fn generate_handler_args_fq(items: &[MessageItem]) -> TokenStream {
             let name = format_ident!("_{}", sanitize_ident(&arg.name));
             let ty = map_type_fq(arg);
             if arg.typ == "string" {
-                args.push(quote! { #name: &str });
+                if arg.allow_null.unwrap_or(false) {
+                    args.push(quote! { #name: Option<&str> });
+                } else {
+                    args.push(quote! { #name: &str });
+                }
             } else if arg.typ == "array" {
                 args.push(quote! { #name: &[u8] });
             } else if arg.typ == "new_id" && arg.interface.is_none() {
