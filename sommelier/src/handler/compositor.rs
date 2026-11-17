@@ -175,7 +175,7 @@ impl crate::protocols::xdg_shell::xdg_toplevel::XdgToplevelHandler for Composito
         Action::Forward
     }
 
-    fn on_set_app_id(&mut self, ctx: &mut Context, app_id: &String) -> Action {
+    fn on_set_app_id(&mut self, ctx: &mut Context, app_id: &str) -> Action {
         let xdg_toplevel_id = ctx.last_sender_id;
 
         // Resolve xdg_toplevel → wl_surface (guest) → wl_surface (host).
@@ -283,7 +283,7 @@ mod tests {
         ctx.last_sender_id = xdg_toplevel_id;
 
         let mut handler = CompositorHandler;
-        let action = handler.on_set_app_id(&mut ctx, &"my_app".to_string());
+        let action = handler.on_set_app_id(&mut ctx, "my_app");
         assert_eq!(action, Action::Forward);
 
         assert_eq!(ctx.client_to_host_queue.len(), 2);
@@ -311,7 +311,7 @@ mod tests {
             .insert(wl_surface_host, zaura_surface_host);
 
         let mut handler = CompositorHandler;
-        let action = handler.on_set_app_id(&mut ctx, &"reused".to_string());
+        let action = handler.on_set_app_id(&mut ctx, "reused");
         assert_eq!(action, Action::Forward);
 
         assert_eq!(ctx.client_to_host_queue.len(), 1);
@@ -326,7 +326,7 @@ mod tests {
         ctx.last_sender_id = xdg_toplevel_id;
 
         let mut handler = CompositorHandler;
-        let action = handler.on_set_app_id(&mut ctx, &"no_shell".to_string());
+        let action = handler.on_set_app_id(&mut ctx, "no_shell");
         assert_eq!(action, Action::Forward);
         assert_eq!(ctx.client_to_host_queue.len(), 0);
     }
@@ -338,7 +338,7 @@ mod tests {
         ctx.last_sender_id = xdg_toplevel_id;
 
         let mut handler = CompositorHandler;
-        let action = handler.on_set_app_id(&mut ctx, &"old_host".to_string());
+        let action = handler.on_set_app_id(&mut ctx, "old_host");
         assert_eq!(action, Action::Forward);
 
         // get_aura_surface is sent (always available), but set_application_id is skipped.
@@ -374,7 +374,7 @@ mod tests {
 
         ctx.last_sender_id = xdg_toplevel_id;
         let mut handler = CompositorHandler;
-        handler.on_set_app_id(&mut ctx, &"app".to_string());
+        handler.on_set_app_id(&mut ctx, "app");
 
         let zaura_surface_host = *ctx
             .wl_surface_to_zaura_surface

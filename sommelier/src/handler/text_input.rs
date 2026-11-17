@@ -45,8 +45,8 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         &mut self,
         ctx: &mut Context,
         _serial: u32,
-        text: &String,
-        _commit: &String,
+        text: &str,
+        _commit: &str,
     ) -> Action {
         let host_id = ctx.last_sender_id;
         log::trace!(">>> on_preedit_string: host_id={}, text={:?}", host_id, text);
@@ -61,7 +61,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         Action::Drop
     }
 
-    fn on_commit_string(&mut self, ctx: &mut Context, _serial: u32, text: &String) -> Action {
+    fn on_commit_string(&mut self, ctx: &mut Context, _serial: u32, text: &str) -> Action {
         let host_id = ctx.last_sender_id;
         log::trace!(
             ">>> on_commit_string: host_id={}, text={:?}",
@@ -225,7 +225,7 @@ impl zwp_text_input_v1::ZwpTextInputV1Handler for TextInputV1Handler {
         Action::Drop
     }
 
-    fn on_language(&mut self, ctx: &mut Context, _serial: u32, _language: &String) -> Action {
+    fn on_language(&mut self, ctx: &mut Context, _serial: u32, _language: &str) -> Action {
         let host_id = ctx.last_sender_id;
         log::trace!(
             ">>> on_language: host_id={}, language={:?}",
@@ -279,7 +279,7 @@ impl zcr_extended_text_input_v1::ZcrExtendedTextInputV1Handler for ExtendedTextI
         _ctx: &mut Context,
         _start: u32,
         _end: u32,
-        _suggestion: &String,
+        _suggestion: &str,
     ) -> Action {
         log::trace!(
             ">>> on_add_grammar_fragment: start={}, end={}, suggestion={:?}",
@@ -401,7 +401,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
     fn on_set_surrounding_text(
         &mut self,
         ctx: &mut Context,
-        text: &String,
+        text: &str,
         cursor: i32,
         anchor: i32,
     ) -> Action {
@@ -414,7 +414,7 @@ impl zwp_text_input_v3::ZwpTextInputV3Handler for TextInputV3Handler {
             anchor
         );
         if let Some(state) = ctx.text_inputs.get_mut(&guest_id) {
-            state.surrounding_text = Some((text.clone(), cursor, anchor));
+            state.surrounding_text = Some((text.to_string(), cursor, anchor));
         }
         Action::Drop
     }
