@@ -34,11 +34,11 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         &mut self,
         ctx: &mut Context,
         name: u32,
-        interface: &String,
+        interface: &str,
         version: u32,
     ) -> Action {
         // Track host globals
-        ctx.host_globals.insert(interface.clone(), name);
+        ctx.host_globals.insert(interface.to_string(), name);
 
         if interface == "zwp_linux_dmabuf_v1" {
             if !ctx.gpu_accel {
@@ -197,13 +197,13 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             ctx.client_to_host_queue.push((full_msg, Vec::new()));
         }
 
-        let is_allowed = WL_ALLOWED.contains(&interface.as_str())
-            || XDG_ALLOWED.contains(&interface.as_str())
-            || DMABUF_ALLOWED.contains(&interface.as_str())
-            || VIEWPORTER_ALLOWED.contains(&interface.as_str())
-            || TEXT_INPUT_ALLOWED.contains(&interface.as_str())
-            || (XDG_DECORATION_ALLOWED.contains(&interface.as_str()) && ctx.xdg_decoration)
-            || FRACTIONAL_SCALE_ALLOWED.contains(&interface.as_str())
+        let is_allowed = WL_ALLOWED.contains(&interface)
+            || XDG_ALLOWED.contains(&interface)
+            || DMABUF_ALLOWED.contains(&interface)
+            || VIEWPORTER_ALLOWED.contains(&interface)
+            || TEXT_INPUT_ALLOWED.contains(&interface)
+            || (XDG_DECORATION_ALLOWED.contains(&interface) && ctx.xdg_decoration)
+            || FRACTIONAL_SCALE_ALLOWED.contains(&interface)
             || interface == "wl_data_device_manager";
 
         if !is_allowed {

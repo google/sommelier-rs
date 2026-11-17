@@ -43,7 +43,7 @@ impl wl_data_device::WlDataDeviceHandler for DataDeviceHandler {
 }
 
 impl wl_data_offer::WlDataOfferHandler for DataDeviceHandler {
-    fn on_receive(&mut self, ctx: &mut Context, mime_type: &String, fd: i32) -> Action {
+    fn on_receive(&mut self, ctx: &mut Context, mime_type: &str, fd: i32) -> Action {
         debug!("wl_data_offer.receive: mime_type={}, fd={}", mime_type, fd);
 
         if let Some(virtwl) = &ctx.virtwayland_channel {
