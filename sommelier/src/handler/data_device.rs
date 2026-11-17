@@ -90,7 +90,7 @@ impl WlDataDeviceHandler for DataDeviceHandler {
 }
 
 impl WlDataSourceHandler for DataDeviceHandler {
-    fn on_target(&mut self, _ctx: &mut Context, _mime_type: &str) -> Action {
+    fn on_target(&mut self, _ctx: &mut Context, _mime_type: Option<&str>) -> Action {
         Action::Forward
     }
     fn on_send(&mut self, _ctx: &mut Context, mime_type: &str, fd: RawFd) -> Action {
