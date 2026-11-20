@@ -29,92 +29,62 @@ use log::error;
 
 pub struct RegistryHandler;
 
+impl RegistryHandler {
+    fn enqueue_bind(
+        ctx: &mut Context,
+        registry_host_id: u32,
+        name: u32,
+        interface: &str,
+        version: u32,
+        host_new_id: u32,
+    ) {
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(name);
+        builder.write_string(interface);
+        builder.write_u32(version);
+        builder.write_u32(host_new_id);
+
+        let mut full_msg = Vec::new();
+        full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
+        let len = (builder.payload.len() + 8) as u32;
+        let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
+        full_msg.extend_from_slice(&word2.to_ne_bytes());
+        full_msg.extend_from_slice(&builder.payload);
+
+        ctx.client_to_host_queue.push((full_msg, Vec::new()));
+    }
+}
+
 impl wl_registry::WlRegistryHandler for RegistryHandler {
     fn on_global(&mut self, ctx: &mut Context, name: u32, interface: &str, version: u32) -> Action {
         // Track host globals
         ctx.host_globals.insert(interface.to_string(), name);
 
-        if interface == "zxdg_decoration_manager_v1" {
-            if !ctx.xdg_decoration {
-                return Action::Drop;
-            }
+        if interface == "zxdg_decoration_manager_v1" && !ctx.xdg_decoration {
+            return Action::Drop;
         }
 
         if interface == "zwp_linux_dmabuf_v1" {
             if !ctx.gpu_accel {
                 return Action::Drop;
             }
-            let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_dmabuf_id = Some(host_id);
-            let placeholder_guest_id = 0xFE00_0000 | host_id;
-            ctx.shadow_table.map_id(placeholder_guest_id, host_id);
-            ctx.shadow_table
-                .track_interface(placeholder_guest_id, "zwp_linux_dmabuf_v1".to_string());
-
-            let client_version = version;
-            let mut global_builder = MessageBuilder::new();
-            global_builder.write_u32(name);
-            global_builder.write_string(interface);
-            global_builder.write_u32(client_version);
-
-            // Translate host registry ID to guest registry ID
-            let registry_guest_id = ctx
-                .shadow_table
-                .get_guest_id(ctx.last_sender_id)
-                .unwrap_or(ctx.last_sender_id);
-
-            let mut global_msg = Vec::new();
-            global_msg.extend_from_slice(&registry_guest_id.to_ne_bytes());
-            let len = (global_builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::EVT_GLOBAL as u32);
-            global_msg.extend_from_slice(&word2.to_ne_bytes());
-            global_msg.extend_from_slice(&global_builder.payload);
-            ctx.host_to_client_queue.push((global_msg, Vec::new()));
-
-            // 2. Bind internally
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            builder.write_u32(client_version);
-            builder.write_u32(host_id); // new_id
-
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
-
-            // Drop the original global event so we don't send the v4 advertisement
-            return Action::Drop;
-        } else if interface == "wl_shm" {
+            if ctx.host_dmabuf_id.is_none() {
+                let host_id = ctx.shadow_table.allocate_host_id();
+                ctx.host_dmabuf_id = Some(host_id);
+                let placeholder_guest_id = 0xFE00_0000 | host_id;
+                ctx.shadow_table.map_id(placeholder_guest_id, host_id);
+                ctx.shadow_table
+                    .track_interface(placeholder_guest_id, "zwp_linux_dmabuf_v1".to_string());
+                Self::enqueue_bind(ctx, ctx.last_sender_id, name, interface, version, host_id);
+            }
+        } else if interface == "wl_shm" && ctx.host_shm_id.is_none() {
             let host_id = ctx.shadow_table.allocate_host_id();
             ctx.host_shm_id = Some(host_id);
-            // Map to a high-bit placeholder guest ID
             let placeholder_guest_id = 0xFD00_0000 | host_id;
             ctx.shadow_table.map_id(placeholder_guest_id, host_id);
             ctx.shadow_table
                 .track_interface(placeholder_guest_id, "wl_shm".to_string());
-
-            // Bind to wl_shm
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            builder.write_u32(1); // Bind version 1
-            builder.write_u32(host_id); // new_id
-
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            Self::enqueue_bind(ctx, ctx.last_sender_id, name, interface, 1, host_id);
         }
 
         if !WL_ALLOWED.contains(&interface)
@@ -170,20 +140,14 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         let registry_guest_id = ctx.last_sender_id;
 
         if let Some(registry_host_id) = ctx.shadow_table.get_host_id(registry_guest_id) {
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(_name);
-            builder.write_string(interface);
-            builder.write_u32(*_version);
-            builder.write_u32(host_new_id);
-
-            let mut full_msg = Vec::new();
-            full_msg.extend_from_slice(&registry_host_id.to_ne_bytes());
-            let len = (builder.payload.len() + 8) as u32;
-            let word2 = (len << 16) | (wl_registry::REQ_BIND as u32);
-            full_msg.extend_from_slice(&word2.to_ne_bytes());
-            full_msg.extend_from_slice(&builder.payload);
-
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            Self::enqueue_bind(
+                ctx,
+                registry_host_id,
+                _name,
+                interface,
+                *_version,
+                host_new_id,
+            );
         } else {
             error!("Registry not mapped! Guest ID: {}", registry_guest_id);
         }
@@ -213,5 +177,32 @@ mod tests {
         let action = handler.on_global(&mut ctx, 1, "zxdg_decoration_manager_v1", 1);
         assert_eq!(action, Action::Drop);
         assert_eq!(ctx.host_globals.get("zxdg_decoration_manager_v1"), Some(&1));
+    }
+
+    #[test]
+    fn test_internal_globals_bound_once_across_registries() {
+        let mut handler = RegistryHandler;
+        let mut ctx = Context::new(true, false);
+
+        ctx.last_sender_id = 10;
+        assert_eq!(handler.on_global(&mut ctx, 1, "wl_shm", 1), Action::Forward);
+        assert_eq!(
+            handler.on_global(&mut ctx, 2, "zwp_linux_dmabuf_v1", 4),
+            Action::Forward
+        );
+        let shm_id = ctx.host_shm_id;
+        let dmabuf_id = ctx.host_dmabuf_id;
+        assert_eq!(ctx.client_to_host_queue.len(), 2);
+
+        // Second wl_registry on the same connection: forward globals, no new internal binds.
+        ctx.last_sender_id = 11;
+        assert_eq!(handler.on_global(&mut ctx, 1, "wl_shm", 1), Action::Forward);
+        assert_eq!(
+            handler.on_global(&mut ctx, 2, "zwp_linux_dmabuf_v1", 4),
+            Action::Forward
+        );
+        assert_eq!(ctx.host_shm_id, shm_id);
+        assert_eq!(ctx.host_dmabuf_id, dmabuf_id);
+        assert_eq!(ctx.client_to_host_queue.len(), 2);
     }
 }
