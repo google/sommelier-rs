@@ -238,25 +238,25 @@ impl Client {
                 Ok(None)
             };
 
-            match result {
+            let forwarded = match result {
                 Ok(Some((data, fds))) => {
                     log::debug!("  -> translated ({} bytes, {} fds)", data.len(), fds.len());
-
-                    out_buffer.extend_from_slice(&data);
-                    out_fds.extend(fds);
+                    Some((data, fds))
                 }
                 Ok(None) => {
                     log::debug!("  -> dropped (unhandled)");
+                    None
                 }
                 Err(e) => {
                     log::error!("Protocol error: {}", e);
                     return false;
                 }
-            }
+            };
 
             fd_offset += consumed_fds;
 
-            // Add pending messages from context
+            // Drain messages queued by the handler before appending any forwarded
+            // message so host new_id allocations stay in strict wire order.
             let queue = match direction {
                 Direction::ClientToHost => &mut self.ctx.client_to_host_queue,
                 Direction::HostToClient => &mut self.ctx.host_to_client_queue,
@@ -271,11 +271,40 @@ impl Client {
                 out_fds.extend(p_fds);
             }
 
+            if let Some((data, fds)) = forwarded {
+                out_buffer.extend_from_slice(&data);
+                out_fds.extend(fds);
+            }
+
             offset += len;
         }
 
         let mut success = true;
         if !out_buffer.is_empty() && other_conn.send(&out_buffer, &out_fds).await.is_err() {
+            success = false;
+        }
+
+        // Flush opposite-direction messages queued while handling this batch
+        // (e.g. internal wl_registry.bind during HostToClient, or synthetic
+        // wl_shm.format events during ClientToHost) before the next recv batch.
+        let reverse_queue = match direction {
+            Direction::ClientToHost => &mut self.ctx.host_to_client_queue,
+            Direction::HostToClient => &mut self.ctx.client_to_host_queue,
+        };
+        let mut reverse_out_buf = Vec::new();
+        let mut reverse_out_fds = Vec::new();
+        for (p_data, p_fds) in reverse_queue.drain(..) {
+            log::debug!(
+                "  -> adding reverse queued message ({} bytes, {} fds)",
+                p_data.len(),
+                p_fds.len()
+            );
+            reverse_out_buf.extend_from_slice(&p_data);
+            reverse_out_fds.extend(p_fds);
+        }
+        if !reverse_out_buf.is_empty()
+            && conn.send(&reverse_out_buf, &reverse_out_fds).await.is_err()
+        {
             success = false;
         }
 
@@ -285,6 +314,7 @@ impl Client {
         // closed accidentally.
         let mut fds_to_close: std::collections::HashSet<RawFd> = std::collections::HashSet::new();
         fds_to_close.extend(out_fds.iter());
+        fds_to_close.extend(reverse_out_fds.iter());
         fds_to_close.extend(conn.read_fds.iter().take(fd_offset));
 
         for fd in fds_to_close {
