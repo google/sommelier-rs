@@ -19,7 +19,7 @@ use crate::protocols;
 use crate::state::Context;
 use crate::virtwl_channel::VirtWaylandChannel;
 use crate::wire::{ProtocolError, WireMessage};
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::{IntoRawFd, RawFd};
 use std::sync::Arc;
@@ -291,7 +291,7 @@ impl Client {
                 Ok(None)
             };
 
-            match result {
+            let forwarded = match result {
                 Ok(Some((mut data, fds))) => {
                     log::debug!("  -> translated ({} bytes, {} fds)", data.len(), fds.len());
 
@@ -314,11 +314,11 @@ impl Client {
                         }
                     }
 
-                    out_buffer.extend_from_slice(&data);
-                    out_fds.extend(fds);
+                    Some((data, fds))
                 }
                 Ok(None) => {
                     log::debug!("  -> dropped (unhandled)");
+                    None
                 }
                 Err(e) => {
                     let guest_id_for_log = match direction {
@@ -328,14 +328,23 @@ impl Client {
                     let interface = guest_id_for_log
                         .and_then(|gid| self.ctx.shadow_table.get_interface(gid).cloned())
                         .unwrap_or_else(|| "unknown".to_string());
-                    log::error!("Protocol error: {} (direction={:?}, id={}, guest_id={:?}, interface={}, opcode={})", e, direction, sender_id, guest_id_for_log, interface, opcode);
+                    log::error!(
+                        "Protocol error: {} (direction={:?}, id={}, guest_id={:?}, interface={}, opcode={})",
+                        e,
+                        direction,
+                        sender_id,
+                        guest_id_for_log,
+                        interface,
+                        opcode
+                    );
                     return false;
                 }
-            }
+            };
 
             fd_offset += consumed_fds;
 
-            // Add pending messages from context
+            // Drain messages queued by the handler before appending any forwarded
+            // message so host new_id allocations stay in strict wire order.
             let queue = match direction {
                 Direction::ClientToHost => &mut self.ctx.client_to_host_queue,
                 Direction::HostToClient => &mut self.ctx.host_to_client_queue,
@@ -348,6 +357,11 @@ impl Client {
                 );
                 out_buffer.extend_from_slice(&p_data);
                 out_fds.extend(p_fds);
+            }
+
+            if let Some((data, fds)) = forwarded {
+                out_buffer.extend_from_slice(&data);
+                out_fds.extend(fds);
             }
 
             offset += len;
@@ -592,7 +606,9 @@ pub async fn run(
                                 }
                             }
                         } else {
-                            log::error!("Local compositor path required if not using virtio-wayland (or if it failed)");
+                            log::error!(
+                                "Local compositor path required if not using virtio-wayland (or if it failed)"
+                            );
                         }
                     }
                     conn

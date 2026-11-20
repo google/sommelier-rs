@@ -18,9 +18,9 @@ use crate::protocols::fractional_scale_v1::ALLOWED_INTERFACES as FRACTIONAL_SCAL
 use crate::protocols::linux_dmabuf_v1::ALLOWED_INTERFACES as DMABUF_ALLOWED;
 use crate::protocols::text_input_unstable_v3::ALLOWED_INTERFACES as TEXT_INPUT_ALLOWED;
 use crate::protocols::viewporter::ALLOWED_INTERFACES as VIEWPORTER_ALLOWED;
+use crate::protocols::wayland::ALLOWED_INTERFACES as WL_ALLOWED;
 use crate::protocols::wayland::wl_registry;
 use crate::protocols::wayland::wl_shm;
-use crate::protocols::wayland::ALLOWED_INTERFACES as WL_ALLOWED;
 use crate::protocols::xdg_decoration_unstable_v1::ALLOWED_INTERFACES as XDG_DECORATION_ALLOWED;
 use crate::protocols::xdg_shell::ALLOWED_INTERFACES as XDG_ALLOWED;
 use crate::state::{Context, HostId};
@@ -29,14 +29,34 @@ use log::error;
 
 pub struct RegistryHandler;
 
-impl wl_registry::WlRegistryHandler for RegistryHandler {
-    fn on_global(
-        &mut self,
+impl RegistryHandler {
+    fn enqueue_bind(
         ctx: &mut Context,
+        registry_host_id: u32,
         name: u32,
         interface: &str,
         version: u32,
-    ) -> Action {
+        host_new_id: u32,
+    ) {
+        let mut builder = MessageBuilder::new();
+        builder.write_u32(name);
+        builder.write_string(interface);
+        builder.write_u32(version);
+        builder.write_u32(host_new_id);
+
+        let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND);
+        ctx.client_to_host_queue.push((full_msg, Vec::new()));
+    }
+
+    fn bind_internal(ctx: &mut Context, name: u32, interface: &str, version: u32) -> u32 {
+        let host_id = ctx.shadow_table.allocate_host_id();
+        Self::enqueue_bind(ctx, ctx.last_sender_id, name, interface, version, host_id);
+        host_id
+    }
+}
+
+impl wl_registry::WlRegistryHandler for RegistryHandler {
+    fn on_global(&mut self, ctx: &mut Context, name: u32, interface: &str, version: u32) -> Action {
         // Track host globals
         ctx.host_globals.insert(interface.to_string(), name);
 
@@ -44,46 +64,21 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             if !ctx.gpu_accel {
                 return Action::Drop;
             }
-            let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_dmabuf_id = Some(host_id);
-            // Register for event dispatch: the host compositor sends format/modifier
-            // events to the dmabuf factory object after we bind it.
-            ctx.shadow_table
-                .track_host_interface(host_id, "zwp_linux_dmabuf_v1".to_string());
-
-            let client_version = version;
-            let mut global_builder = MessageBuilder::new();
-            global_builder.write_u32(name);
-            global_builder.write_string(interface);
-            global_builder.write_u32(client_version);
-
-            // Translate host registry ID to guest registry ID
-            let registry_guest_id = ctx
-                .shadow_table
-                .get_guest_id(ctx.last_sender_id)
-                .unwrap_or(ctx.last_sender_id);
-
-            let global_msg = global_builder.build_message(registry_guest_id, wl_registry::EVT_GLOBAL as u16);
-            ctx.host_to_client_queue.push((global_msg, Vec::new()));
-
-            // 2. Bind internally
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            builder.write_u32(client_version);
-            builder.write_u32(host_id); // new_id
-
-            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
-
-            // Drop the original global event so we don't send the v4 advertisement
-            return Action::Drop;
+            if ctx.host_dmabuf_id.is_none() {
+                let host_id = Self::bind_internal(ctx, name, interface, version);
+                ctx.host_dmabuf_id = Some(host_id);
+                // Register for event dispatch: the host compositor sends format/modifier
+                // events to the dmabuf factory object after we bind it.
+                ctx.shadow_table
+                    .track_host_interface(host_id, "zwp_linux_dmabuf_v1".to_string());
+            }
         } else if interface == "zwp_text_input_manager_v1" {
-            let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_text_input_manager_v1_id = Some(host_id);
-            // The host does not send events to the text_input_manager factory; no
-            // shadow table entry needed.
+            if ctx.host_text_input_manager_v1_id.is_none() {
+                let host_id = Self::bind_internal(ctx, name, interface, version);
+                ctx.host_text_input_manager_v1_id = Some(host_id);
+                // The host does not send events to the text_input_manager factory; no
+                // shadow table entry needed.
+            }
 
             let client_version = 1;
             let mut global_builder = MessageBuilder::new();
@@ -97,61 +92,30 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
                 .get_guest_id(ctx.last_sender_id)
                 .unwrap_or(ctx.last_sender_id);
 
-            let global_msg = global_builder.build_message(registry_guest_id, wl_registry::EVT_GLOBAL as u16);
+            let global_msg =
+                global_builder.build_message(registry_guest_id, wl_registry::EVT_GLOBAL);
             ctx.host_to_client_queue.push((global_msg, Vec::new()));
-
-            // 2. Bind internally
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            builder.write_u32(version);
-            builder.write_u32(host_id); // new_id
-
-            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
 
             return Action::Drop;
         } else if interface == "zcr_text_input_extension_v1" {
-            let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_text_input_extension_v1_id = Some(host_id);
-            // The host does not send events to the text_input_extension factory; no
-            // shadow table entry needed.
-
-            // 2. Bind internally
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            builder.write_u32(version);
-            builder.write_u32(host_id); // new_id
-
-            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
-
+            if ctx.host_text_input_extension_v1_id.is_none() {
+                let host_id = Self::bind_internal(ctx, name, interface, version);
+                ctx.host_text_input_extension_v1_id = Some(host_id);
+                // The host does not send events to the text_input_extension factory; no
+                // shadow table entry needed.
+            }
             return Action::Drop;
         } else if interface == "zcr_keyboard_extension_v1" {
             // Bind zcr_keyboard_extension_v1 internally. This is a ChromeOS-
             // specific protocol that enables the ack-key mechanism for
             // controlling host accelerator processing. Not exposed to the guest.
-            let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_keyboard_extension_id = Some(HostId::from_allocated(host_id));
-            // The host does not send events to the keyboard_extension factory; no
-            // shadow table entry needed.
-
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            // Bind at v1: we only need ack_key. peek_key (added in v2) is
-            // intentionally not used.
-            builder.write_u32(1);
-            builder.write_u32(host_id);
-
-            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
-            log::debug!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
-
+            if ctx.host_keyboard_extension_id.is_none() {
+                // Bind at v1: we only need ack_key. peek_key (added in v2) is
+                // intentionally not used.
+                let host_id = Self::bind_internal(ctx, name, interface, 1);
+                ctx.host_keyboard_extension_id = Some(HostId::from_allocated(host_id));
+                log::debug!("Bound zcr_keyboard_extension_v1 (host_id={})", host_id);
+            }
             return Action::Drop;
         } else if interface == "zaura_shell" {
             // Bind zaura_shell internally for ChromeOS shelf integration.
@@ -159,42 +123,21 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             // IDs so the shelf can match windows to .desktop entries.
             // Not exposed to the guest; capped at v38 (need v5 for
             // set_application_id, v38 for release destructor).
-            let host_id = ctx.shadow_table.allocate_host_id();
-            let bound_version = std::cmp::min(version, 38);
-            ctx.host_zaura_shell_id = Some(host_id);
-            ctx.host_zaura_shell_version = bound_version;
-            ctx.shadow_table
-                .track_host_interface(host_id, "zaura_shell".to_string());
-
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            builder.write_u32(bound_version);
-            builder.write_u32(host_id);
-
-            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
-            log::debug!("Bound zaura_shell internally (host_id={})", host_id);
-
+            if ctx.host_zaura_shell_id.is_none() {
+                let bound_version = std::cmp::min(version, 38);
+                let host_id = Self::bind_internal(ctx, name, interface, bound_version);
+                ctx.host_zaura_shell_id = Some(host_id);
+                ctx.host_zaura_shell_version = bound_version;
+                ctx.shadow_table
+                    .track_host_interface(host_id, "zaura_shell".to_string());
+                log::debug!("Bound zaura_shell internally (host_id={})", host_id);
+            }
             return Action::Drop;
-        } else if interface == "wl_shm" {
-            let host_id = ctx.shadow_table.allocate_host_id();
-            ctx.host_shm_id = Some(host_id);
+        } else if interface == "wl_shm" && ctx.host_shm_id.is_none() {
             // wl_shm is emulated: on_bind drops the guest request and sends synthetic
             // format events, so the host never sends wl_shm events to us. No shadow
             // table entry is needed.
-
-            // Bind to wl_shm
-            let registry_host_id = ctx.last_sender_id;
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(name);
-            builder.write_string(interface);
-            builder.write_u32(1); // Bind version 1
-            builder.write_u32(host_id); // new_id
-
-            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            ctx.host_shm_id = Some(Self::bind_internal(ctx, name, interface, 1));
         }
 
         let is_allowed = WL_ALLOWED.contains(&interface)
@@ -226,7 +169,7 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
             for format in [0u32, 1u32] {
                 let mut builder = MessageBuilder::new();
                 builder.write_u32(format);
-                let msg = builder.build_message(*guest_new_id, wl_shm::EVT_FORMAT as u16);
+                let msg = builder.build_message(*guest_new_id, wl_shm::EVT_FORMAT);
                 ctx.host_to_client_queue.push((msg, Vec::new()));
             }
 
@@ -254,18 +197,51 @@ impl wl_registry::WlRegistryHandler for RegistryHandler {
         let registry_guest_id = ctx.last_sender_id;
 
         if let Some(registry_host_id) = ctx.shadow_table.get_host_id(registry_guest_id) {
-            let mut builder = MessageBuilder::new();
-            builder.write_u32(_name);
-            builder.write_string(interface);
-            builder.write_u32(*_version);
-            builder.write_u32(host_new_id);
-
-            let full_msg = builder.build_message(registry_host_id, wl_registry::REQ_BIND as u16);
-            ctx.client_to_host_queue.push((full_msg, Vec::new()));
+            Self::enqueue_bind(
+                ctx,
+                registry_host_id,
+                _name,
+                interface,
+                *_version,
+                host_new_id,
+            );
         } else {
             error!("Registry not mapped! Guest ID: {}", registry_guest_id);
         }
 
         Action::Drop
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::wayland::wl_registry::WlRegistryHandler;
+
+    #[test]
+    fn test_internal_globals_bound_once_across_registries() {
+        let mut handler = RegistryHandler;
+        let mut ctx = Context::new_for_test(true, false, vec![]);
+        let globals = [
+            (1, "wl_shm", 1, Action::Forward),
+            (2, "zwp_linux_dmabuf_v1", 4, Action::Forward),
+            (3, "zwp_text_input_manager_v1", 1, Action::Drop),
+            (4, "zcr_text_input_extension_v1", 1, Action::Drop),
+            (5, "zcr_keyboard_extension_v1", 2, Action::Drop),
+            (6, "zaura_shell", 40, Action::Drop),
+        ];
+
+        for registry_host_id in [10u32, 11u32] {
+            ctx.last_sender_id = registry_host_id;
+            for &(name, iface, ver, expected_action) in &globals {
+                assert_eq!(
+                    handler.on_global(&mut ctx, name, iface, ver),
+                    expected_action
+                );
+            }
+        }
+
+        assert_eq!(ctx.client_to_host_queue.len(), 6);
+        assert_eq!(ctx.host_to_client_queue.len(), 2); // v3 advertisement per registry
     }
 }
